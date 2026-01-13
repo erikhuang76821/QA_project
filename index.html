@@ -34,7 +34,7 @@
             Activity, MessageSquare, AlertTriangle, Calendar, Clock, 
             User, ArrowUpDown, ArrowUp, ArrowDown, RefreshCw, 
             Zap, Send, BarChart3, X, Filter, ListFilter, ExternalLink,
-            Merge, Trash2, Plus, Timer
+            Merge, Trash2, Plus, Timer, Percent, ChevronRight
         } from 'lucide-react';
 
         const App = () => {
@@ -82,12 +82,17 @@
             // 分析頁面的月度篩選
             const [selectedMonth, setSelectedMonth] = useState('');
             
-            // 分析頁面：選中的窗口
+            // 分析頁面：選中的窗口與排序
             const [selectedWindow, setSelectedWindow] = useState(null);
+            const [windowSort, setWindowSort] = useState({ key: 'quality', direction: 'asc' }); // 預設品質由低到高 (asc)
 
             // 分析頁面：案件清單的篩選與排序狀態
             const [caseFilter, setCaseFilter] = useState('all'); 
             const [caseSort, setCaseSort] = useState('date-desc'); 
+
+            // *分析: 專案類型選取與詳細篩選
+            const [selectedType, setSelectedType] = useState(null);
+            const [typeDetailFilter, setTypeDetailFilter] = useState('late'); // 預設顯示延遲
 
             // *設定: 專案合併規則 state
             // 結構: [{ id: 1, targetName: '合併後名稱', sources: ['原名稱1', '原名稱2'] }]
@@ -116,6 +121,7 @@
 
             useEffect(() => {
                 setSelectedWindow(null);
+                setSelectedType(null); // 切換月份或資料更新時重置
                 setCaseFilter('all');
             }, [selectedMonth, data]);
 
@@ -171,11 +177,23 @@
             // *分析: 點擊人名邏輯 (開/關)
             const handleWindowClick = (name) => {
                 if (selectedWindow === name) {
-                setSelectedWindow(null); // 再次點擊則關閉
+                    setSelectedWindow(null); 
                 } else {
-                setSelectedWindow(name);
+                    setSelectedWindow(name);
+                    setSelectedType(null); // 互斥
                 }
             };
+
+            // *分析: 點擊類型邏輯 (開/關)
+            const handleTypeClick = (name) => {
+                if (selectedType === name) {
+                    setSelectedType(null);
+                } else {
+                    setSelectedType(name);
+                    setSelectedWindow(null); // 互斥
+                    setTypeDetailFilter('late'); // 預設篩選延遲
+                }
+            }
 
             // 取得選中窗口的詳細資料
             const getSelectedWindowData = useMemo(() => {
@@ -201,6 +219,39 @@
 
                 return windowData;
             }, [data, selectedWindow, selectedMonth, caseFilter, caseSort]);
+
+            // *分析: 取得選中類型的詳細資料
+            const getSelectedTypeData = useMemo(() => {
+                if (!data || !selectedType) return [];
+                
+                let targetData = data;
+                if (selectedMonth) {
+                    targetData = targetData.filter(row => getMonthStr(row[2]) === selectedMonth);
+                }
+                
+                // 篩選該類型 (包含合併規則)
+                let typeData = targetData.filter(row => {
+                    const tName = getMergedTypeName(row[0] || '未分類');
+                    return tName === selectedType;
+                });
+
+                // 篩選器
+                if (typeDetailFilter === 'issue') {
+                    typeData = typeData.filter(row => isFeedbackCountable(row[8]));
+                } else if (typeDetailFilter === 'late') {
+                    typeData = typeData.filter(row => isLate(row));
+                }
+
+                // 預設依日期排序 (新到舊)
+                typeData.sort((a, b) => {
+                    const dateA = new Date(a[2] || 0);
+                    const dateB = new Date(b[2] || 0);
+                    return dateB - dateA;
+                });
+
+                return typeData;
+            }, [data, selectedType, selectedMonth, typeDetailFilter, mergeRules]);
+
 
             // 捲動到指定項目
             const scrollToTicket = (ticketId) => {
@@ -384,6 +435,10 @@
             const handleSort = (key) => setSortConfig(c => (c.key === key ? { key: c.key, direction: c.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'asc' }));
             const getSortIcon = (key) => sortConfig.key !== key ? <ArrowUpDown size={14} className="opacity-30" /> : (sortConfig.direction === 'asc' ? <ArrowUp size={14} className="text-blue-600" /> : <ArrowDown size={14} className="text-blue-600" />);
 
+            // *專案窗口排序邏輯
+            const handleWindowSort = (key) => setWindowSort(c => (c.key === key ? { key: c.key, direction: c.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'asc' }));
+            const getWindowSortIcon = (key) => windowSort.key !== key ? <ArrowUpDown size={12} className="opacity-30" /> : (windowSort.direction === 'asc' ? <ArrowUp size={12} className="text-blue-600" /> : <ArrowDown size={12} className="text-blue-600" />);
+
             const analyticsStats = useMemo(() => {
                 if (!data) return null;
                 const months = new Set();
@@ -412,11 +467,37 @@
                 });
 
                 const maxWindowTotal = Math.max(...Object.values(windowStats).map(d => d.total), 1);
-                const sortedWindows = Object.entries(windowStats).sort(([,a], [,b]) => b.total - a.total).map(([name, stats]) => ({ name, ...stats, totalPercent: (stats.total / maxWindowTotal) * 100, feedbackPercent: (stats.feedback / maxWindowTotal) * 100, latePercent: (stats.late / maxWindowTotal) * 100 }));
+                
+                // *分析: 窗口統計加入品質與排序
+                const sortedWindows = Object.entries(windowStats).map(([name, stats]) => {
+                    const quality = stats.total > 0 ? (1 - (stats.late / stats.total)) * 100 : 100;
+                    return { 
+                        name, 
+                        ...stats, 
+                        quality,
+                        totalPercent: (stats.total / maxWindowTotal) * 100, 
+                        feedbackPercent: (stats.feedback / maxWindowTotal) * 100, 
+                        latePercent: (stats.late / maxWindowTotal) * 100 
+                    };
+                }).sort((a, b) => {
+                    // 根據 windowSort 排序
+                    let valA, valB;
+                    switch (windowSort.key) {
+                        case 'total': valA = a.total; valB = b.total; break;
+                        case 'feedback': valA = a.feedback; valB = b.feedback; break;
+                        case 'late': valA = a.late; valB = b.late; break;
+                        case 'quality': valA = a.quality; valB = b.quality; break;
+                        default: valA = a.quality; valB = b.quality; // 預設品質
+                    }
+                    if (valA < valB) return windowSort.direction === 'asc' ? -1 : 1;
+                    if (valA > valB) return windowSort.direction === 'asc' ? 1 : -1;
+                    return 0;
+                });
+
                 const sortedTypes = Object.entries(typeStats).map(([name, stats]) => ({ name, total: stats.total, late: stats.late, lateRatio: stats.total > 0 ? (stats.late / stats.total) * 100 : 0 })).sort((a, b) => b.lateRatio - a.lateRatio);
 
                 return { months: sortedMonths, totalCount: targetData.length, windows: sortedWindows, types: sortedTypes };
-            }, [data, selectedMonth, mergeRules]); 
+            }, [data, selectedMonth, mergeRules, windowSort]); 
 
             // 合併專案設定邏輯
             const addMergeRule = () => {
@@ -631,55 +712,88 @@
                             </div>
                         </div>
                         {analyticsStats ? (
-                        <div className={`grid gap-6 ${selectedWindow ? 'lg:grid-cols-12' : 'lg:grid-cols-2'}`}>
-                            {/* 左側：專案窗口統計 */}
-                            <div className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] transition-all duration-300 ${selectedWindow ? 'lg:col-span-4' : 'lg:col-span-1'}`}>
-                                <div className="flex items-center justify-between mb-6"><h3 className="font-bold text-slate-700 flex items-center gap-2"><User size={18} className="text-blue-500" />專案窗口統計</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">{analyticsStats.windows.length} 位</span></div>
-                                {!selectedWindow && (
-                                    <div className="flex gap-4 mb-4 text-xs flex-wrap"><div className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full"></span> 送測</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-orange-500 rounded-full"></span> 反應數</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-full"></span> 延遲</div></div>
-                                )}
-                                <div className="flex-1 overflow-y-auto pr-2 space-y-2">
-                                    {analyticsStats.windows.map((item, i) => (
-                                    <div 
-                                        key={i} 
-                                        onClick={() => handleWindowClick(item.name)} 
-                                        className={`group p-3 rounded-lg border transition-all cursor-pointer ${selectedWindow === item.name ? 'bg-blue-50 border-blue-200 shadow-sm' : 'border-transparent hover:bg-slate-50'}`}
-                                    >
-                                        <div className="flex justify-between items-baseline mb-1">
-                                        <span className={`font-bold text-sm ${selectedWindow === item.name ? 'text-blue-700' : 'text-slate-700'}`}>{item.name}</span>
-                                        <span className="text-xs text-slate-400">總計: {item.total}</span>
-                                        </div>
-                                        <div className="space-y-1.5">
-                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-blue-500 rounded-full" style={{ width: `${item.totalPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-blue-600 font-medium">{item.total}</span></div>
-                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-orange-500 rounded-full" style={{ width: `${item.feedbackPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-orange-600 font-medium">{item.feedback}</span></div>
-                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-red-500 rounded-full" style={{ width: `${item.latePercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-red-600 font-medium">{item.late}</span></div>
-                                        </div>
-                                    </div>
-                                    ))}
-                                </div>
-                            </div>
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                             
-                            {/* 右側欄位 */}
-                            {selectedWindow ? (
-                                <div className="bg-white p-6 rounded-xl border border-blue-200 shadow-sm flex flex-col h-[600px] animate-in slide-in-from-right-4 fade-in duration-300 lg:col-span-8">
-                                {/* 詳細案件清單 */}
+                            {/* 左側與中間邏輯：
+                                1. 無選取: 左(1/2) 窗口列表, 右(1/2) 類型列表 -> 但原設計是 Grid 2 cols. 
+                                   這裡需注意: 原本是 grid gap-6 ... ? lg:grid-cols-12 : lg:grid-cols-2
+                                   如果選取窗口: 左(4) 列表, 右(8) 詳細
+                                   如果選取類型: 左(8) 詳細, 右(4) 列表
+                            */}
+
+                            {/* 區塊 A: 窗口列表 */}
+                            {!selectedType && (
+                                <div className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] transition-all duration-300 ${selectedWindow ? 'lg:col-span-4' : 'lg:col-span-6'}`}>
+                                    <div className="flex items-center justify-between mb-4"><h3 className="font-bold text-slate-700 flex items-center gap-2"><User size={18} className="text-blue-500" />專案窗口統計</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">{analyticsStats.windows.length} 位</span></div>
+                                    
+                                    {/* *窗口排序與標頭 */}
+                                    <div className="flex gap-2 mb-2 text-xs text-slate-500 border-b border-slate-100 pb-2">
+                                        <button onClick={() => handleWindowSort('total')} className="flex items-center gap-1 hover:text-blue-600">送測 {getWindowSortIcon('total')}</button>
+                                        <button onClick={() => handleWindowSort('feedback')} className="flex items-center gap-1 hover:text-orange-600">反應 {getWindowSortIcon('feedback')}</button>
+                                        <button onClick={() => handleWindowSort('late')} className="flex items-center gap-1 hover:text-red-600">延遲 {getWindowSortIcon('late')}</button>
+                                        <button onClick={() => handleWindowSort('quality')} className="flex items-center gap-1 hover:text-green-600 ml-auto">品質(%) {getWindowSortIcon('quality')}</button>
+                                    </div>
+
+                                    {!selectedWindow && (
+                                        <div className="flex gap-4 mb-4 text-xs flex-wrap"><div className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full"></span> 送測</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-orange-500 rounded-full"></span> 反應數</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-full"></span> 延遲</div></div>
+                                    )}
+                                    <div className="flex-1 overflow-y-auto pr-2 space-y-2">
+                                        {analyticsStats.windows.map((item, i) => (
+                                        <div 
+                                            key={i} 
+                                            onClick={() => handleWindowClick(item.name)} 
+                                            className={`group p-3 rounded-lg border transition-all cursor-pointer ${selectedWindow === item.name ? 'bg-blue-50 border-blue-200 shadow-sm' : 'border-transparent hover:bg-slate-50'}`}
+                                        >
+                                            <div className="flex justify-between items-baseline mb-1">
+                                                <span className={`font-bold text-sm ${selectedWindow === item.name ? 'text-blue-700' : 'text-slate-700'}`}>{item.name}</span>
+                                                {/* 顯示品質分數 */}
+                                                <span className={`text-xs font-mono font-bold ${item.quality < 80 ? 'text-red-500' : item.quality < 95 ? 'text-orange-500' : 'text-green-600'}`}>
+                                                    {item.quality.toFixed(1)}%
+                                                </span>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-blue-500 rounded-full" style={{ width: `${item.totalPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-blue-600 font-medium">{item.total}</span></div>
+                                                <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-orange-500 rounded-full" style={{ width: `${item.feedbackPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-orange-600 font-medium">{item.feedback}</span></div>
+                                                <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-red-500 rounded-full" style={{ width: `${item.latePercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-red-600 font-medium">{item.late}</span></div>
+                                            </div>
+                                        </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                            
+                            {/* 區塊 B: 詳細案件清單 (共用：窗口或類型) */}
+                            {(selectedWindow || selectedType) && (
+                                <div className={`bg-white p-6 rounded-xl border border-blue-200 shadow-sm flex flex-col h-[600px] animate-in slide-in-from-right-4 fade-in duration-300 ${selectedType ? 'lg:col-span-8 lg:order-first' : 'lg:col-span-8'}`}>
+                                {/* 根據選取類型顯示標題 */}
                                 <div className="flex items-center justify-between mb-4 border-b border-blue-100 pb-4">
                                     <div className="flex flex-col gap-1">
                                         <h3 className="font-bold text-slate-800 flex items-center gap-2 text-lg">
-                                            <User size={20} className="text-blue-600" />
-                                            {selectedWindow} <span className="text-slate-400 text-sm font-normal">詳細案件清單</span>
+                                            {selectedWindow ? <User size={20} className="text-blue-600" /> : <Clock size={20} className="text-red-500" />}
+                                            {selectedWindow || selectedType} <span className="text-slate-400 text-sm font-normal">詳細案件清單</span>
                                         </h3>
                                     </div>
-                                    <button onClick={() => setSelectedWindow(null)} className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors" title="關閉詳細檢視">
+                                    <button onClick={() => { setSelectedWindow(null); setSelectedType(null); }} className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors" title="關閉詳細檢視">
                                     <X size={20} />
                                     </button>
                                 </div>
 
+                                {/* 篩選器列 */}
                                 <div className="flex flex-col md:flex-row gap-3 mb-4 justify-between">
                                     <div className="flex bg-slate-100 p-1 rounded-lg self-start">
-                                        <button onClick={() => setCaseFilter('all')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${caseFilter === 'all' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>全部</button>
-                                        <button onClick={() => setCaseFilter('issue')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'issue' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><AlertTriangle size={12}/> 狀況反應</button>
-                                        <button onClick={() => setCaseFilter('late')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'late' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Clock size={12}/> 延遲</button>
+                                        {selectedWindow ? (
+                                            <>
+                                                <button onClick={() => setCaseFilter('all')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${caseFilter === 'all' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>全部</button>
+                                                <button onClick={() => setCaseFilter('issue')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'issue' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><AlertTriangle size={12}/> 狀況反應</button>
+                                                <button onClick={() => setCaseFilter('late')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'late' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Clock size={12}/> 延遲</button>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <button onClick={() => setTypeDetailFilter('late')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${typeDetailFilter === 'late' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Clock size={12}/> 延遲</button>
+                                                <button onClick={() => setTypeDetailFilter('issue')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${typeDetailFilter === 'issue' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><AlertTriangle size={12}/> 狀況反應</button>
+                                                <button onClick={() => setTypeDetailFilter('all')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${typeDetailFilter === 'all' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>全部</button>
+                                            </>
+                                        )}
                                     </div>
                                     <div className="flex items-center gap-2 self-end md:self-auto">
                                         <ListFilter size={14} className="text-slate-400" />
@@ -691,13 +805,13 @@
                                 </div>
 
                                 <div className="flex-1 overflow-y-auto pr-1 space-y-3">
-                                    {getSelectedWindowData.length === 0 ? (
+                                    {(selectedWindow ? getSelectedWindowData : getSelectedTypeData).length === 0 ? (
                                         <div className="flex flex-col items-center justify-center h-full text-slate-400">
                                             <Search size={32} className="mb-2 opacity-20" />
                                             <p className="text-sm">沒有符合條件的案件</p>
                                         </div>
                                     ) : (
-                                        getSelectedWindowData.map((row, idx) => {
+                                        (selectedWindow ? getSelectedWindowData : getSelectedTypeData).map((row, idx) => {
                                         const late = isLate(row);
                                         const hasFeedback = isFeedbackCountable(row[8]);
                                         return (
@@ -708,9 +822,13 @@
                                                             {late && <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse shadow-sm" title="遲送"></span>}
                                                             <h4 className="font-bold text-slate-800 text-base">{row[4]}</h4>
                                                         </div>
-                                                        <div className="flex items-center gap-2">
+                                                        <div className="flex items-center gap-2 flex-wrap">
                                                             <span className="text-[10px] bg-white border border-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-mono">{row[0]}</span>
                                                             <span className="text-[10px] text-slate-400 flex items-center gap-1"><Calendar size={10}/> {formatSimpleDate(row[2])}</span>
+                                                            {/* 若是類型模式，顯示窗口名稱 */}
+                                                            {selectedType && (
+                                                                <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full flex items-center gap-1"><User size={10}/> {row[5]}</span>
+                                                            )}
                                                         </div>
                                                     </div>
                                                     <div className="flex flex-col items-end gap-1">
@@ -733,20 +851,39 @@
                                     )}
                                 </div>
                                 </div>
-                            ) : (
-                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] lg:col-span-1">
-                                    <div className="flex items-center justify-between mb-6"><h3 className="font-bold text-slate-700 flex items-center gap-2"><Clock size={18} className="text-red-500" />專案類型延遲比率</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">依延遲率排序 ({mergeRules.length} 條合併規則)</span></div>
-                                    <div className="flex-1 overflow-y-auto pr-2 space-y-4">
-                                        {analyticsStats.types.map((item, i) => (
-                                        <div key={i} className="group p-3 border border-slate-100 rounded-lg hover:border-slate-200 hover:bg-slate-50 transition-colors">
-                                            <div className="flex justify-between items-center mb-2"><div className="flex items-center gap-2"><span className={`flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${i < 3 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{i + 1}</span><span className="font-medium text-slate-700">{item.name}</span></div><span className="font-bold text-red-600 text-sm">{item.lateRatio.toFixed(1)}%</span></div>
-                                            <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden mb-1"><div className={`h-full rounded-full ${item.lateRatio > 50 ? 'bg-red-600' : item.lateRatio > 20 ? 'bg-red-400' : 'bg-red-300'}`} style={{ width: `${item.lateRatio}%` }}></div></div>
-                                            <div className="flex justify-end text-[10px] text-slate-400 gap-2"><span>遲送: {item.late}</span><span>/</span><span>總數: {item.total}</span></div>
-                                        </div>
-                                        ))}
-                                    </div>
-                                </div>
                             )}
+
+                            {/* 區塊 C: 類型列表 */}
+                            {/* 如果沒選 Window，才顯示類型列表。選了 Window 就藏起來 */}
+                            {!selectedWindow && (
+                            <div className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] transition-all duration-300 ${selectedType ? 'lg:col-span-4' : 'lg:col-span-6'}`}>
+                                <div className="flex items-center justify-between mb-6"><h3 className="font-bold text-slate-700 flex items-center gap-2"><Clock size={18} className="text-red-500" />專案類型延遲比率</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">依延遲率排序</span></div>
+                                <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                                    {analyticsStats.types.map((item, i) => (
+                                    <div 
+                                        key={i} 
+                                        onClick={() => handleTypeClick(item.name)}
+                                        className={`group p-3 border rounded-lg transition-all cursor-pointer 
+                                            ${selectedType === item.name 
+                                                ? 'border-red-200 bg-red-50 translate-x-2 shadow-sm' 
+                                                : 'border-slate-100 hover:border-slate-200 hover:bg-slate-50'}`}
+                                    >
+                                        <div className="flex justify-between items-center mb-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${i < 3 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{i + 1}</span>
+                                                <span className={`font-medium ${selectedType === item.name ? 'text-red-700' : 'text-slate-700'}`}>{item.name}</span>
+                                                {selectedType === item.name && <ChevronRight size={14} className="text-red-400" />}
+                                            </div>
+                                            <span className="font-bold text-red-600 text-sm">{item.lateRatio.toFixed(1)}%</span>
+                                        </div>
+                                        <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden mb-1"><div className={`h-full rounded-full ${item.lateRatio > 50 ? 'bg-red-600' : item.lateRatio > 20 ? 'bg-red-400' : 'bg-red-300'}`} style={{ width: `${item.lateRatio}%` }}></div></div>
+                                        <div className="flex justify-end text-[10px] text-slate-400 gap-2"><span>遲送: {item.late}</span><span>/</span><span>總數: {item.total}</span></div>
+                                    </div>
+                                    ))}
+                                </div>
+                            </div>
+                            )}
+
                         </div>
                         ) : (<div className="text-center py-20 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200"><BarChart3 size={48} className="mx-auto mb-3 opacity-20" /><p>請先讀取資料</p></div>)}
                     </div>
