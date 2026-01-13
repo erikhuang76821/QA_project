@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>案件管理系統</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入 Babel 用於解析 JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- 設定 Import Map，讓瀏覽器知道去哪裡抓 react 和 lucide -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.292.0"
+        }
+    }
+    </script>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <!-- 你的程式碼邏輯放在這裡 -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            FileSpreadsheet, Table, Search, AlertCircle, Key, Check, 
+            Loader2, Info, Globe, Lock, LayoutDashboard, Settings, 
+            Activity, MessageSquare, AlertTriangle, Calendar, Clock, 
+            User, ArrowUpDown, ArrowUp, ArrowDown, RefreshCw, 
+            Zap, Send, BarChart3, X, Filter, ListFilter, ExternalLink,
+            Merge, Trash2, Plus, Timer
+        } from 'lucide-react';
+
+        const App = () => {
+            // --- 1. 狀態管理 ---
+            const [activeTab, setActiveTab] = useState('dashboard');
+            
+            // Google Sheets 設定
+            const [url, setUrl] = useState('https://docs.google.com/spreadsheets/d/1h9y5EMPISDJUXae1YRSVIJ-FBW-JvB0spADmzrzcIs8/edit#gid=0');
+            const [spreadsheetId, setSpreadsheetId] = useState('');
+            const [mode, setMode] = useState('public'); 
+            const [apiKey, setApiKey] = useState('');
+            
+            // 範圍參數
+            const [sheetName, setSheetName] = useState('案件反饋');
+            const [startCol, setStartCol] = useState('B');
+            const [endCol, setEndCol] = useState('L');
+            const [startRow, setStartRow] = useState('2');
+            const [endRow, setEndRow] = useState(''); 
+            
+            // 資料
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [constructedRange, setConstructedRange] = useState('');
+            const [lastUpdatedTime, setLastUpdatedTime] = useState(null);
+
+            // --- 新增功能狀態 ---
+            
+            // 自動刷新
+            const [autoRefresh, setAutoRefresh] = useState(false);
+            const [refreshInterval, setRefreshInterval] = useState(5); // 分鐘
+            const [countdown, setCountdown] = useState(0); // 倒數計時用
+            
+            // Telegram 通知
+            // *設定 : 請預設chat id = 1326042316
+            const [tgToken, setTgToken] = useState('7759005999:AAGynjlqnLPCk_zSVQi0AvtOtYOpWHQGHzA');
+            const [tgChatId, setTgChatId] = useState('1326042316');
+            const [tgTestStatus, setTgTestStatus] = useState(''); // 測試按鈕狀態
+            
+            // 比對用：儲存上一次的資料快照
+            const prevDataRef = useRef(null);
+
+            // 排序狀態 (Dashboard)
+            const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+            // 分析頁面的月度篩選
+            const [selectedMonth, setSelectedMonth] = useState('');
+            
+            // 分析頁面：選中的窗口
+            const [selectedWindow, setSelectedWindow] = useState(null);
+
+            // 分析頁面：案件清單的篩選與排序狀態
+            const [caseFilter, setCaseFilter] = useState('all'); 
+            const [caseSort, setCaseSort] = useState('date-desc'); 
+
+            // *設定: 專案合併規則 state
+            // 結構: [{ id: 1, targetName: '合併後名稱', sources: ['原名稱1', '原名稱2'] }]
+            const [mergeRules, setMergeRules] = useState([]);
+            // 輔助輸入 state
+            const [editingRuleName, setEditingRuleName] = useState('');
+            const [editingSource, setEditingSource] = useState('');
+
+            // 標記最長天數的 ID (用於跳轉)
+            const [highlightId, setHighlightId] = useState(null);
+
+            // --- 2. 輔助邏輯 ---
+
+            useEffect(() => {
+                const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/);
+                if (match && match[1]) {
+                setSpreadsheetId(match[1]);
+                }
+            }, [url]);
+
+            useEffect(() => {
+                const safeSheetName = sheetName.includes(' ') ? `'${sheetName}'` : sheetName;
+                const range = `${safeSheetName}!${startCol}${startRow}:${endCol}${endRow}`;
+                setConstructedRange(range);
+            }, [sheetName, startCol, endCol, startRow, endRow]);
+
+            useEffect(() => {
+                setSelectedWindow(null);
+                setCaseFilter('all');
+            }, [selectedMonth, data]);
+
+            // 日期處理
+            const formatSimpleDate = (dateStr) => {
+                if (!dateStr) return '';
+                const str = String(dateStr);
+                if (str.startsWith('Date(')) {
+                const parts = str.match(/Date\((\d+),(\d+),(\d+)\)/);
+                if (parts) return `${parts[1]}/${parseInt(parts[2]) + 1}/${parts[3]}`;
+                }
+                const d = new Date(str);
+                if (!isNaN(d.getTime())) return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+                return str;
+            };
+
+            const getMonthStr = (dateStr) => {
+                if (!dateStr) return '未知月份';
+                const str = String(dateStr);
+                let d;
+                if (str.startsWith('Date(')) {
+                const parts = str.match(/Date\((\d+),(\d+),(\d+)\)/);
+                if (parts) d = new Date(parts[1], parts[2], parts[3]);
+                } else {
+                d = new Date(str);
+                }
+                return (d && !isNaN(d.getTime())) ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : '未知月份';
+            };
+
+            // 判斷邏輯
+            const isLate = (row) => {
+                const val = row[9]; // K欄
+                if (!val) return false; 
+                const str = String(val).trim();
+                const safeWords = ['無', '沒有', '空白', ''];
+                return !safeWords.includes(str);
+            };
+
+            const isFeedbackCountable = (val) => {
+                if (!val) return false;
+                const str = String(val).trim();
+                const excludeList = ['空白', '無', '外包協測', '外包主測', '外包測試'];
+                return !excludeList.includes(str);
+            };
+
+            // *分析: 取得合併後的專案名稱
+            const getMergedTypeName = (originalName) => {
+                if (!originalName) return '未分類';
+                const rule = mergeRules.find(r => r.sources.includes(originalName));
+                return rule ? rule.targetName : originalName;
+            };
+
+            // *分析: 點擊人名邏輯 (開/關)
+            const handleWindowClick = (name) => {
+                if (selectedWindow === name) {
+                setSelectedWindow(null); // 再次點擊則關閉
+                } else {
+                setSelectedWindow(name);
+                }
+            };
+
+            // 取得選中窗口的詳細資料
+            const getSelectedWindowData = useMemo(() => {
+                if (!data || !selectedWindow) return [];
+                
+                let targetData = data;
+                if (selectedMonth) {
+                    targetData = targetData.filter(row => getMonthStr(row[2]) === selectedMonth);
+                }
+                let windowData = targetData.filter(row => row[5] === selectedWindow);
+
+                if (caseFilter === 'issue') {
+                windowData = windowData.filter(row => isFeedbackCountable(row[8]));
+                } else if (caseFilter === 'late') {
+                windowData = windowData.filter(row => isLate(row));
+                }
+
+                windowData.sort((a, b) => {
+                const dateA = new Date(a[2] || 0);
+                const dateB = new Date(b[2] || 0);
+                return caseSort === 'date-asc' ? dateA - dateB : dateB - dateA;
+                });
+
+                return windowData;
+            }, [data, selectedWindow, selectedMonth, caseFilter, caseSort]);
+
+            // 捲動到指定項目
+            const scrollToTicket = (ticketId) => {
+                const element = document.getElementById(`ticket-${ticketId}`);
+                if (element) {
+                element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setHighlightId(ticketId);
+                setTimeout(() => setHighlightId(null), 2000); // 2秒後移除高亮
+                }
+            };
+
+            // --- 3. Telegram 通知核心邏輯 ---
+            const sendTelegramMessage = useCallback(async (text) => {
+                if (!tgToken || !tgChatId) return;
+                try {
+                const url = `https://api.telegram.org/bot${tgToken}/sendMessage`;
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: tgChatId, text: text, parse_mode: 'HTML' })
+                });
+                const resData = await response.json();
+                console.log('TG Send Result:', resData);
+                } catch (e) { console.error('TG 發送失敗', e); }
+            }, [tgToken, tgChatId]);
+
+            const checkAndNotify = useCallback((newData) => {
+                if (!prevDataRef.current) { prevDataRef.current = newData; return; }
+                const oldData = prevDataRef.current;
+                
+                // 定義正規化函式：將 '空白', '無', '' 視為相同
+                const normalize = (val) => {
+                    const str = String(val || '').trim();
+                    return ['空白', '無', ''].includes(str) ? '' : str;
+                };
+
+                if (newData.length > oldData.length) {
+                const newRows = newData.slice(oldData.length);
+                newRows.forEach(row => {
+                    if (row[0]) {
+                    const msg = `🆕 <b>新增任務</b>\n任務內容：${row[4] || '(無名稱)'} , 品檢: ${row[6] || ''}`;
+                    sendTelegramMessage(msg);
+                    }
+                });
+                }
+
+                const compareLength = Math.min(oldData.length, newData.length);
+                for (let i = 0; i < compareLength; i++) {
+                const oldRow = oldData[i]; const newRow = newData[i];
+                
+                const oldJ = normalize(oldRow[8]); const newJ = normalize(newRow[8]);
+                const oldK = normalize(oldRow[9]); const newK = normalize(newRow[9]);
+
+                let changeDesc = '';
+                // 只有在正規化後的值不同時才發送通知
+                if (oldJ !== newJ) changeDesc += `\n狀況反饋(J): "${oldRow[8] || '無'}" ➔ "${newRow[8] || '無'}"`;
+                if (oldK !== newK) changeDesc += `\n遲送狀態(K): "${oldRow[9] || '無'}" ➔ "${newRow[9] || '無'}"`;
+
+                if (changeDesc) {
+                    const now = new Date();
+                    const timeStr = `${now.getFullYear()}/${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                    const msg = `⚠️ <b>測試狀況異動</b> : ${timeStr}\n任務：${newRow[4] || '(無名稱)'}${changeDesc}`;
+                    sendTelegramMessage(msg);
+                }
+                }
+                prevDataRef.current = newData;
+            }, [sendTelegramMessage]);
+
+            const getTgUpdates = async () => {
+                if (!tgToken) { setTgTestStatus('請先輸入 Token'); return; }
+                setTgTestStatus('連線中...');
+                try {
+                const res = await fetch(`https://api.telegram.org/bot${tgToken}/getUpdates`);
+                const data = await res.json();
+                if (data.ok && data.result.length > 0) {
+                    const lastMsg = data.result[data.result.length - 1];
+                    const chatId = lastMsg.message?.chat?.id || lastMsg.my_chat_member?.chat?.id;
+                    if (chatId) {
+                    setTgChatId(String(chatId)); setTgTestStatus(`成功! ID: ${chatId}`);
+                    } else { setTgTestStatus('找不到 Chat ID'); }
+                } else { setTgTestStatus('無新訊息'); }
+                } catch (e) { setTgTestStatus('連線失敗'); }
+            };
+
+            // --- 4. 資料讀取 (Fetch) ---
+            const fetchData = useCallback(async (isAuto = false) => {
+                if (!spreadsheetId) return;
+                if (mode === 'api' && !apiKey) return;
+                if (!isAuto) setLoading(true); setError(null);
+                try {
+                let values = [];
+                if (mode === 'api') {
+                    const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(constructedRange)}?key=${apiKey}`;
+                    const headers = apiKey.length > 60 && !apiKey.startsWith('AIza') ? { 'Authorization': `Bearer ${apiKey}` } : {};
+                    const response = await fetch(mode === 'api' && headers.Authorization ? `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(constructedRange)}` : apiUrl, { headers });
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.error?.message || '讀取失敗');
+                    values = result.values || [];
+                } else {
+                    const gvizUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&range=${startCol}${startRow}:${endCol}${endRow}&t=${Date.now()}`;
+                    const response = await fetch(gvizUrl);
+                    if (!response.ok) throw new Error('讀取失敗');
+                    const text = await response.text();
+                    const json = JSON.parse(text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1));
+                    if (json.status === 'error') throw new Error(json.errors?.[0]?.detailed_message);
+                    values = json.table.rows.map(row => row.c.map(cell => (cell && cell.v !== null) ? cell.v : ''));
+                }
+                const currentStartRow = parseInt(startRow) || 1;
+                const valuesWithMeta = values.map((row, index) => { const newRow = [...row]; newRow.push(currentStartRow + index); return newRow; });
+                const filteredValues = valuesWithMeta.filter(row => row[0] !== undefined && row[0] !== '' && row[0] !== null);
+                setData(filteredValues); setLastUpdatedTime(new Date());
+                if (filteredValues.length > 0) checkAndNotify(filteredValues);
+                } catch (err) { console.error(err); if (!isAuto) setError(err.message); } finally { setLoading(false); }
+            }, [spreadsheetId, constructedRange, mode, apiKey, sheetName, startCol, endCol, startRow, endRow, checkAndNotify]);
+
+            // --- 5. 自動刷新計時器 ---
+            useEffect(() => {
+                let timer = null; let counter = null;
+                if (autoRefresh && refreshInterval > 0) {
+                setCountdown(refreshInterval * 60);
+                counter = setInterval(() => { setCountdown(prev => (prev <= 1 ? refreshInterval * 60 : prev - 1)); }, 1000);
+                timer = setInterval(() => { fetchData(true); }, refreshInterval * 60 * 1000);
+                } else { setCountdown(0); }
+                return () => { if (timer) clearInterval(timer); if (counter) clearInterval(counter); };
+            }, [autoRefresh, refreshInterval, fetchData]);
+
+            // --- 統計計算 ---
+            const activeStats = useMemo(() => {
+                if (!data) return null;
+                const activeData = data.filter(row => !row[3]); // E欄(Index 3)無結束日期
+                const lateCount = activeData.filter(row => isLate(row)).length;
+                const feedbackCount = activeData.filter(row => isFeedbackCountable(row[8])).length;
+
+                // 計算最長天數
+                let maxDays = 0;
+                let maxDaysTicket = null;
+                const now = new Date();
+                
+                activeData.forEach(row => {
+                    // D欄 (Index 2) 為送測日
+                    let date = null;
+                    const dStr = String(row[2]);
+                    if (dStr.startsWith('Date(')) {
+                        const parts = dStr.match(/Date\((\d+),(\d+),(\d+)\)/);
+                        if (parts) {
+                            date = new Date(parseInt(parts[1]), parseInt(parts[2]), parseInt(parts[3]));
+                        }
+                    } else {
+                        date = new Date(dStr);
+                    }
+
+                    if (date && !isNaN(date.getTime())) {
+                        const diffTime = Math.abs(now - date);
+                        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24)); 
+                        if (diffDays > maxDays) {
+                            maxDays = diffDays;
+                            maxDaysTicket = row;
+                        }
+                    }
+                });
+
+                const sortedList = [...activeData].sort((a, b) => {
+                if (sortConfig.key) {
+                    let valA = '', valB = '';
+                    if (sortConfig.key === 'type') { valA = a[0] || ''; valB = b[0] || ''; } 
+                    else if (sortConfig.key === 'feedback') { valA = a[8] || ''; valB = b[8] || ''; } 
+                    else if (sortConfig.key === 'row') { valA = a[1]; valB = b[1]; } // 改用單號(C欄位, Index 1)排序
+                    else return 0;
+
+                    if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+                    if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+                    return 0;
+                } 
+                const lateA = isLate(a); const lateB = isLate(b);
+                return (lateA && !lateB) ? -1 : (!lateA && lateB) ? 1 : 0;
+                });
+
+                return { list: sortedList, count: activeData.length, lateCount, feedbackCount, maxDays, maxDaysTicket };
+            }, [data, sortConfig]);
+
+            const handleSort = (key) => setSortConfig(c => (c.key === key ? { key: c.key, direction: c.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'asc' }));
+            const getSortIcon = (key) => sortConfig.key !== key ? <ArrowUpDown size={14} className="opacity-30" /> : (sortConfig.direction === 'asc' ? <ArrowUp size={14} className="text-blue-600" /> : <ArrowDown size={14} className="text-blue-600" />);
+
+            const analyticsStats = useMemo(() => {
+                if (!data) return null;
+                const months = new Set();
+                data.forEach(row => { if (row[2]) months.add(getMonthStr(row[2])); });
+                const sortedMonths = Array.from(months).sort().reverse();
+
+                let targetData = data;
+                if (selectedMonth) targetData = data.filter(row => getMonthStr(row[2]) === selectedMonth);
+
+                const windowStats = {}; const typeStats = {};
+                
+                targetData.forEach(row => {
+                const wName = row[5] || '未指定';
+                if (!windowStats[wName]) windowStats[wName] = { total: 0, feedback: 0, late: 0 };
+                windowStats[wName].total++;
+                if (isFeedbackCountable(row[8])) windowStats[wName].feedback++;
+                if (isLate(row)) windowStats[wName].late++;
+
+                // *分析: 應用合併規則
+                let tName = row[0] || '未分類';
+                tName = getMergedTypeName(tName);
+
+                if (!typeStats[tName]) typeStats[tName] = { total: 0, late: 0 };
+                typeStats[tName].total++;
+                if (isLate(row)) typeStats[tName].late++;
+                });
+
+                const maxWindowTotal = Math.max(...Object.values(windowStats).map(d => d.total), 1);
+                const sortedWindows = Object.entries(windowStats).sort(([,a], [,b]) => b.total - a.total).map(([name, stats]) => ({ name, ...stats, totalPercent: (stats.total / maxWindowTotal) * 100, feedbackPercent: (stats.feedback / maxWindowTotal) * 100, latePercent: (stats.late / maxWindowTotal) * 100 }));
+                const sortedTypes = Object.entries(typeStats).map(([name, stats]) => ({ name, total: stats.total, late: stats.late, lateRatio: stats.total > 0 ? (stats.late / stats.total) * 100 : 0 })).sort((a, b) => b.lateRatio - a.lateRatio);
+
+                return { months: sortedMonths, totalCount: targetData.length, windows: sortedWindows, types: sortedTypes };
+            }, [data, selectedMonth, mergeRules]); 
+
+            // 合併專案設定邏輯
+            const addMergeRule = () => {
+                if (!editingRuleName || !editingSource) return;
+                setMergeRules(prev => {
+                    const existingRule = prev.find(r => r.targetName === editingRuleName);
+                    if (existingRule) {
+                        if (!existingRule.sources.includes(editingSource)) {
+                            return prev.map(r => r.targetName === editingRuleName ? { ...r, sources: [...r.sources, editingSource] } : r);
+                        }
+                        return prev;
+                    } else {
+                        return [...prev, { id: Date.now(), targetName: editingRuleName, sources: [editingSource] }];
+                    }
+                });
+                setEditingSource('');
+            };
+
+            const removeMergeSource = (ruleId, sourceToRemove) => {
+                setMergeRules(prev => prev.map(r => {
+                    if (r.id === ruleId) {
+                        const newSources = r.sources.filter(s => s !== sourceToRemove);
+                        return newSources.length === 0 ? null : { ...r, sources: newSources };
+                    }
+                    return r;
+                }).filter(Boolean)); 
+            };
+
+            useEffect(() => { if (spreadsheetId && mode === 'public') fetchData(); }, [spreadsheetId]);
+
+            return (
+                <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col">
+                {/* Top Bar */}
+                <div className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+                    <div className="max-w-7xl mx-auto px-4 md:px-6 h-16 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="bg-blue-600 text-white p-2 rounded-lg">
+                        <Activity size={20} />
+                        </div>
+                        <h1 className="text-xl font-bold text-slate-800 hidden md:block">案件管理系統</h1>
+                        {autoRefresh && (
+                        <div className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 rounded-full text-xs font-mono border border-green-100 ml-2">
+                            <Zap size={12} className="animate-pulse" />
+                            自動同步: {Math.floor(countdown / 60)}:{(countdown % 60).toString().padStart(2, '0')}
+                        </div>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <div className="flex bg-slate-100 p-1 rounded-lg overflow-x-auto">
+                            <button onClick={() => setActiveTab('dashboard')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'dashboard' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                            <LayoutDashboard size={16} /> 進行中
+                            </button>
+                            <button onClick={() => setActiveTab('analytics')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'analytics' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                            <BarChart3 size={16} /> 分析
+                            </button>
+                            <button onClick={() => setActiveTab('console')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'console' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                            <Settings size={16} /> 設定
+                            </button>
+                        </div>
+                        <button 
+                            onClick={() => fetchData()} 
+                            disabled={loading}
+                            className="bg-slate-800 hover:bg-slate-700 text-white p-2 rounded-lg shadow-sm transition-colors flex items-center gap-2 disabled:opacity-50 h-10"
+                            title={`更新資料 (上次更新: ${lastUpdatedTime ? lastUpdatedTime.toLocaleTimeString() : '無'})`}
+                        >
+                            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+                            <span className="text-xs font-bold hidden md:inline">更新</span>
+                        </button>
+                    </div>
+                    </div>
+                </div>
+
+                <div className="flex-1 max-w-7xl mx-auto w-full p-4 md:p-6">
+                    
+                    {/* === View 1: 進行中看板 (Dashboard) === */}
+                    {activeTab === 'dashboard' && (
+                    <div className="space-y-6 animate-in fade-in duration-300">
+                        {!data && !loading && !error && (
+                        <div className="flex flex-col items-center justify-center p-12 bg-slate-100 rounded-xl border border-dashed border-slate-300 text-slate-400">
+                            <p className="mb-4">尚無資料顯示</p>
+                            <button onClick={() => fetchData()} className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 transition-colors">讀取資料</button>
+                        </div>
+                        )}
+                        {activeStats && (
+                        <>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full min-h-[110px]">
+                                    <p className="text-xs text-slate-500 font-medium uppercase">測試中總數</p>
+                                    <p className="text-4xl font-bold text-slate-800 mt-2">{activeStats.count}</p>
+                                </div>
+                                <div className="bg-white p-4 rounded-xl border border-red-100 shadow-sm flex flex-col h-full min-h-[110px]">
+                                    <div className="flex justify-between items-start">
+                                    <div>
+                                        <p className="text-xs text-red-600 font-bold uppercase flex items-center gap-1">
+                                            <span className="w-2 h-2 rounded-full bg-red-500"></span> 遲送
+                                        </p>
+                                        <p className="text-4xl font-bold text-red-600 mt-2">{activeStats.lateCount}</p>
+                                    </div>
+                                    <Clock className="text-red-100" size={32} />
+                                    </div>
+                                </div>
+                                <div className="bg-white p-4 rounded-xl border border-orange-100 shadow-sm flex flex-col h-full min-h-[110px]">
+                                    <div className="flex justify-between items-start">
+                                    <div>
+                                        <p className="text-xs text-orange-600 font-bold uppercase flex items-center gap-1">
+                                            <span className="w-2 h-2 rounded-full bg-orange-500"></span> 有反饋
+                                        </p>
+                                        <p className="text-4xl font-bold text-orange-600 mt-2">{activeStats.feedbackCount}</p>
+                                    </div>
+                                    <MessageSquare className="text-orange-100" size={32} />
+                                    </div>
+                                </div>
+                                <div 
+                                    onClick={() => activeStats.maxDaysTicket && scrollToTicket(activeStats.maxDaysTicket[1])}
+                                    className={`bg-white p-4 rounded-xl border shadow-sm flex flex-col h-full min-h-[110px] group cursor-pointer transition-all hover:border-purple-300 hover:shadow-md ${activeStats.maxDaysTicket ? 'border-purple-100' : 'border-slate-200 opacity-50'}`}
+                                >
+                                    <div className="flex justify-between items-start">
+                                    <div>
+                                        <p className="text-xs text-purple-600 font-bold uppercase flex items-center gap-1">
+                                            <Timer size={12} /> 最長天數
+                                        </p>
+                                        <p className="text-4xl font-bold text-purple-600 mt-2">{activeStats.maxDays} <span className="text-sm font-normal text-purple-400">天</span></p>
+                                    </div>
+                                    <div className="text-right">
+                                        {activeStats.maxDaysTicket && (
+                                            <div className="text-[10px] text-purple-400 bg-purple-50 px-2 py-1 rounded mt-1">
+                                            #{activeStats.maxDaysTicket[1]}<br/>
+                                            {activeStats.maxDaysTicket[4]?.substring(0,6)}...
+                                            </div>
+                                        )}
+                                    </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-[500px]">
+                                <div className="p-4 border-b border-slate-100 bg-slate-50/50"><h3 className="font-semibold text-slate-700">即時測試狀況清單</h3></div>
+                                <div className="overflow-x-auto flex-1">
+                                    <table className="w-full text-sm text-left">
+                                    <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+                                        <tr>
+                                        <th className="p-3 w-20 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('row')}><div className="flex items-center justify-center gap-1">單號{getSortIcon('row')}</div></th>
+                                        <th className="p-3 w-32 cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('type')}><div className="flex items-center gap-1">專案別 (B){getSortIcon('type')}</div></th>
+                                        <th className="p-3 whitespace-nowrap">專案名稱 (F)</th>
+                                        <th className="p-3 w-32 whitespace-nowrap">送測日 (D)</th>
+                                        <th className="p-3 w-32 whitespace-nowrap">窗口 (G)</th>
+                                        <th className="p-3 min-w-[300px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋 (J){getSortIcon('feedback')}</div></th>
+                                        <th className="p-3 w-16 text-center">連結</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-50">
+                                        {activeStats.list.length === 0 ? (
+                                        <tr><td colSpan="7" className="p-8 text-center text-slate-400">目前沒有進行中的案件</td></tr>
+                                        ) : (
+                                        activeStats.list.map((row, i) => {
+                                            const late = isLate(row);
+                                            const ticketId = row[1]; // C欄位, index 1
+                                            const isHighlighted = highlightId === ticketId;
+                                            return (
+                                            <tr 
+                                                key={i} 
+                                                id={`ticket-${ticketId}`}
+                                                className={`group transition-all duration-500 ${late ? 'bg-red-50/10' : ''} ${isHighlighted ? 'bg-purple-100 shadow-inner' : 'hover:bg-blue-50/30'}`}
+                                            >
+                                                <td className="p-3 text-center text-slate-500 font-mono text-xs align-top font-bold">{ticketId}</td>
+                                                <td className="p-3 whitespace-nowrap align-top"><div className="flex items-center gap-2"><div className={`w-2.5 h-2.5 rounded-full shadow-sm shrink-0 ${late ? 'bg-red-500 animate-pulse' : 'bg-green-400/50'}`}></div><span className="font-medium text-slate-700">{row[0]}</span></div></td>
+                                                <td className="p-3 font-medium text-slate-700 align-top">{row[4]}</td>
+                                                <td className="p-3 text-slate-500 font-mono text-xs whitespace-nowrap align-top">{formatSimpleDate(row[2])}</td>
+                                                <td className="p-3 text-slate-600 text-xs whitespace-nowrap align-top">{row[5]}</td>
+                                                <td className="p-3 align-top">
+                                                    {isFeedbackCountable(row[8]) ? (
+                                                    <div className="flex items-start gap-1.5 text-orange-700 bg-orange-50 px-3 py-2 rounded w-full border border-orange-100">
+                                                        <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                                        <span className="text-xs whitespace-normal break-words leading-relaxed">{row[8]}</span>
+                                                    </div>
+                                                    ) : (row[8] && row[8] !== '空白' && row[8] !== '無') ? (
+                                                        <span className="text-slate-400 text-xs">{row[8]} (正常)</span>
+                                                    ) : <span className="text-slate-300">-</span>}
+                                                </td>
+                                                <td className="p-3 align-top text-center">
+                                                    <a 
+                                                    href={`https://igs.redmine-x.com/issues/${ticketId}`} 
+                                                    target="_blank" 
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:bg-blue-100 hover:text-blue-600 transition-colors"
+                                                    title="開啟 Redmine"
+                                                    >
+                                                        <ExternalLink size={14} />
+                                                    </a>
+                                                </td>
+                                            </tr>
+                                            );
+                                        })
+                                        )}
+                                    </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </>
+                        )}
+                    </div>
+                    )}
+
+                    {/* === View 2: 數據分析 (Analytics) === */}
+                    {activeTab === 'analytics' && (
+                    <div className="space-y-6 animate-in fade-in duration-300">
+                        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+                            <div><h2 className="text-lg font-bold text-slate-800">數據統計中心</h2><p className="text-xs text-slate-500 mt-1">月度報表與績效分析 (已排除外包協測/主測/測試)</p></div>
+                            <div className="flex items-center gap-2">
+                                <div className="relative"><Calendar size={16} className="absolute left-3 top-2.5 text-slate-400" /><select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="w-full md:w-48 pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm"><option value="">全部月份 (All Time)</option>{analyticsStats?.months.map(m => (<option key={m} value={m}>{m}</option>))}</select></div>
+                                <button onClick={() => fetchData()} className="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm hover:bg-slate-900">刷新</button>
+                            </div>
+                        </div>
+                        {analyticsStats ? (
+                        <div className={`grid gap-6 ${selectedWindow ? 'lg:grid-cols-12' : 'lg:grid-cols-2'}`}>
+                            {/* 左側：專案窗口統計 */}
+                            <div className={`bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] transition-all duration-300 ${selectedWindow ? 'lg:col-span-4' : 'lg:col-span-1'}`}>
+                                <div className="flex items-center justify-between mb-6"><h3 className="font-bold text-slate-700 flex items-center gap-2"><User size={18} className="text-blue-500" />專案窗口統計</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">{analyticsStats.windows.length} 位</span></div>
+                                {!selectedWindow && (
+                                    <div className="flex gap-4 mb-4 text-xs flex-wrap"><div className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full"></span> 送測</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-orange-500 rounded-full"></span> 反應數</div><div className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500 rounded-full"></span> 延遲</div></div>
+                                )}
+                                <div className="flex-1 overflow-y-auto pr-2 space-y-2">
+                                    {analyticsStats.windows.map((item, i) => (
+                                    <div 
+                                        key={i} 
+                                        onClick={() => handleWindowClick(item.name)} 
+                                        className={`group p-3 rounded-lg border transition-all cursor-pointer ${selectedWindow === item.name ? 'bg-blue-50 border-blue-200 shadow-sm' : 'border-transparent hover:bg-slate-50'}`}
+                                    >
+                                        <div className="flex justify-between items-baseline mb-1">
+                                        <span className={`font-bold text-sm ${selectedWindow === item.name ? 'text-blue-700' : 'text-slate-700'}`}>{item.name}</span>
+                                        <span className="text-xs text-slate-400">總計: {item.total}</span>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-blue-500 rounded-full" style={{ width: `${item.totalPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-blue-600 font-medium">{item.total}</span></div>
+                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-orange-500 rounded-full" style={{ width: `${item.feedbackPercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-orange-600 font-medium">{item.feedback}</span></div>
+                                        <div className="flex items-center gap-2 h-2"><div className="flex-1 h-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-red-500 rounded-full" style={{ width: `${item.latePercent}%` }}></div></div><span className="text-[10px] w-6 text-right text-red-600 font-medium">{item.late}</span></div>
+                                        </div>
+                                    </div>
+                                    ))}
+                                </div>
+                            </div>
+                            
+                            {/* 右側欄位 */}
+                            {selectedWindow ? (
+                                <div className="bg-white p-6 rounded-xl border border-blue-200 shadow-sm flex flex-col h-[600px] animate-in slide-in-from-right-4 fade-in duration-300 lg:col-span-8">
+                                {/* 詳細案件清單 */}
+                                <div className="flex items-center justify-between mb-4 border-b border-blue-100 pb-4">
+                                    <div className="flex flex-col gap-1">
+                                        <h3 className="font-bold text-slate-800 flex items-center gap-2 text-lg">
+                                            <User size={20} className="text-blue-600" />
+                                            {selectedWindow} <span className="text-slate-400 text-sm font-normal">詳細案件清單</span>
+                                        </h3>
+                                    </div>
+                                    <button onClick={() => setSelectedWindow(null)} className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors" title="關閉詳細檢視">
+                                    <X size={20} />
+                                    </button>
+                                </div>
+
+                                <div className="flex flex-col md:flex-row gap-3 mb-4 justify-between">
+                                    <div className="flex bg-slate-100 p-1 rounded-lg self-start">
+                                        <button onClick={() => setCaseFilter('all')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${caseFilter === 'all' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>全部</button>
+                                        <button onClick={() => setCaseFilter('issue')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'issue' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><AlertTriangle size={12}/> 狀況反應</button>
+                                        <button onClick={() => setCaseFilter('late')} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1 ${caseFilter === 'late' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Clock size={12}/> 延遲</button>
+                                    </div>
+                                    <div className="flex items-center gap-2 self-end md:self-auto">
+                                        <ListFilter size={14} className="text-slate-400" />
+                                        <select value={caseSort} onChange={(e) => setCaseSort(e.target.value)} className="text-xs border border-slate-200 rounded p-1.5 bg-white text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-100">
+                                            <option value="date-desc">日期：新 ➔ 舊</option>
+                                            <option value="date-asc">日期：舊 ➔ 新</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div className="flex-1 overflow-y-auto pr-1 space-y-3">
+                                    {getSelectedWindowData.length === 0 ? (
+                                        <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                                            <Search size={32} className="mb-2 opacity-20" />
+                                            <p className="text-sm">沒有符合條件的案件</p>
+                                        </div>
+                                    ) : (
+                                        getSelectedWindowData.map((row, idx) => {
+                                        const late = isLate(row);
+                                        const hasFeedback = isFeedbackCountable(row[8]);
+                                        return (
+                                            <div key={idx} className="p-4 rounded-lg border border-slate-100 bg-slate-50 hover:bg-white hover:border-blue-200 hover:shadow-md transition-all group">
+                                                <div className="flex justify-between items-start mb-3">
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-2 mb-1.5">
+                                                            {late && <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse shadow-sm" title="遲送"></span>}
+                                                            <h4 className="font-bold text-slate-800 text-base">{row[4]}</h4>
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-[10px] bg-white border border-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-mono">{row[0]}</span>
+                                                            <span className="text-[10px] text-slate-400 flex items-center gap-1"><Calendar size={10}/> {formatSimpleDate(row[2])}</span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-col items-end gap-1">
+                                                        {late && <span className="text-[10px] text-red-600 font-bold bg-red-50 px-2 py-1 rounded-full border border-red-100 flex items-center gap-1"><Clock size={10}/> 遲送</span>}
+                                                    </div>
+                                                </div>
+                                                {hasFeedback ? (
+                                                <div className="text-sm text-slate-700 bg-orange-50/50 p-3 rounded-lg border border-orange-100 flex gap-2 items-start">
+                                                        <AlertTriangle size={16} className="shrink-0 mt-0.5 text-orange-500" />
+                                                        <span className="leading-relaxed">{row[8]}</span>
+                                                </div>
+                                                ) : (
+                                                <div className="text-xs text-slate-300 pl-2 border-l-2 border-slate-200 py-1">
+                                                    {row[8] && row[8] !== '空白' && row[8] !== '無' ? row[8] + ' (正常)' : '無特殊反饋'}
+                                                </div>
+                                                )}
+                                            </div>
+                                        );
+                                        })
+                                    )}
+                                </div>
+                                </div>
+                            ) : (
+                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[600px] lg:col-span-1">
+                                    <div className="flex items-center justify-between mb-6"><h3 className="font-bold text-slate-700 flex items-center gap-2"><Clock size={18} className="text-red-500" />專案類型延遲比率</h3><span className="text-xs bg-slate-100 px-2 py-1 rounded text-slate-500">依延遲率排序 ({mergeRules.length} 條合併規則)</span></div>
+                                    <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                                        {analyticsStats.types.map((item, i) => (
+                                        <div key={i} className="group p-3 border border-slate-100 rounded-lg hover:border-slate-200 hover:bg-slate-50 transition-colors">
+                                            <div className="flex justify-between items-center mb-2"><div className="flex items-center gap-2"><span className={`flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${i < 3 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-500'}`}>{i + 1}</span><span className="font-medium text-slate-700">{item.name}</span></div><span className="font-bold text-red-600 text-sm">{item.lateRatio.toFixed(1)}%</span></div>
+                                            <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden mb-1"><div className={`h-full rounded-full ${item.lateRatio > 50 ? 'bg-red-600' : item.lateRatio > 20 ? 'bg-red-400' : 'bg-red-300'}`} style={{ width: `${item.lateRatio}%` }}></div></div>
+                                            <div className="flex justify-end text-[10px] text-slate-400 gap-2"><span>遲送: {item.late}</span><span>/</span><span>總數: {item.total}</span></div>
+                                        </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        ) : (<div className="text-center py-20 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200"><BarChart3 size={48} className="mx-auto mb-3 opacity-20" /><p>請先讀取資料</p></div>)}
+                    </div>
+                    )}
+
+                    {/* === View 3: 設定與通知 (Console) === */}
+                    {activeTab === 'console' && (
+                    <div className="grid lg:grid-cols-12 gap-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                        
+                        {/* 左側: 基本連結設定 & 專案合併 */}
+                        <div className="lg:col-span-4 space-y-6">
+                        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="font-semibold mb-4 flex items-center gap-2 text-slate-700">
+                            <Settings size={18} /> Google Sheets 來源
+                            </h2>
+                            <div className="space-y-4">
+                            <div className="flex bg-slate-100 p-1 rounded-lg">
+                                <button onClick={() => setMode('public')} className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md ${mode === 'public' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><Globe size={16} /> 公開</button>
+                                <button onClick={() => setMode('api')} className={`flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md ${mode === 'api' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}><Key size={16} /> Private API</button>
+                            </div>
+                            <div><label className="block text-sm font-medium text-slate-700 mb-1">Sheet 網址</label><input type="text" value={url} onChange={(e) => setUrl(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm" /></div>
+                            {mode === 'api' && <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" className="w-full p-2 border border-slate-300 rounded text-sm" />}
+                            </div>
+                        </div>
+
+                        {/* *分析: 專案合併功能 */}
+                        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                            <h2 className="font-semibold mb-4 flex items-center gap-2 text-slate-700">
+                            <Merge size={18} /> 專案合併設定 (分析用)
+                            </h2>
+                            <div className="space-y-3 mb-4">
+                                <div className="flex flex-col gap-2">
+                                    <input 
+                                    type="text" 
+                                    value={editingRuleName} 
+                                    onChange={(e) => setEditingRuleName(e.target.value)}
+                                    placeholder="合併後顯示名稱 (例: 專案A)" 
+                                    className="w-full p-2 border border-slate-300 rounded text-sm"
+                                    />
+                                    <div className="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        value={editingSource}
+                                        onChange={(e) => setEditingSource(e.target.value)}
+                                        placeholder="原專案名稱 (B欄位內容)" 
+                                        className="flex-1 p-2 border border-slate-300 rounded text-sm"
+                                    />
+                                    <button onClick={addMergeRule} disabled={!editingRuleName || !editingSource} className="px-3 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                                        <Plus size={16} />
+                                    </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1">
+                                {mergeRules.length === 0 ? (
+                                <p className="text-xs text-slate-400 text-center py-2">尚無合併規則</p>
+                                ) : (
+                                mergeRules.map(rule => (
+                                    <div 
+                                        key={rule.id} 
+                                        onClick={() => setEditingRuleName(rule.targetName)}
+                                        className="bg-slate-50 p-2 rounded border border-slate-200 text-sm cursor-pointer hover:bg-slate-100 transition-colors"
+                                    >
+                                        <div className="font-bold text-slate-700 flex justify-between">
+                                        {rule.targetName}
+                                        </div>
+                                        <div className="mt-1 flex flex-wrap gap-1">
+                                        {rule.sources.map(src => (
+                                            <span key={src} className="text-[10px] bg-white border border-slate-200 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                                {src}
+                                                <button onClick={(e) => { e.stopPropagation(); removeMergeSource(rule.id, src); }} className="text-slate-400 hover:text-red-500"><X size={10} /></button>
+                                            </span>
+                                        ))}
+                                        </div>
+                                    </div>
+                                ))
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                            <div className="flex justify-between items-center mb-4">
+                            <h2 className="font-semibold flex items-center gap-2 text-slate-700"><RefreshCw size={18} /> 自動刷新</h2>
+                            <button onClick={() => setAutoRefresh(!autoRefresh)} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoRefresh ? 'bg-green-500' : 'bg-slate-200'}`}>
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition duration-200 ease-in-out ${autoRefresh ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                            </div>
+                            {autoRefresh ? (
+                                <div className="space-y-3">
+                                <div className="flex items-center justify-between text-sm"><span>刷新頻率 (分鐘)</span><input type="number" min="1" max="60" value={refreshInterval} onChange={(e) => setRefreshInterval(Number(e.target.value))} className="w-20 p-1 border border-slate-300 rounded text-center" /></div>
+                                <div className="p-2 bg-green-50 text-green-700 text-xs rounded flex items-center gap-2"><Activity size={12} className="animate-pulse" /> 系統將每 {refreshInterval} 分鐘自動同步並檢查異動</div>
+                                </div>
+                            ) : (
+                                <p className="text-xs text-slate-500">開啟後將自動同步最新資料並觸發異動通知</p>
+                            )}
+                        </div>
+                        </div>
+
+                        {/* 右側: Telegram 通知設定 */}
+                        <div className="lg:col-span-8 space-y-6">
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <div className="flex items-center justify-between mb-6">
+                                <h2 className="font-semibold flex items-center gap-2 text-slate-700"><Send size={18} className="text-blue-500" /> Telegram 異動通知機器人</h2>
+                                <span className="text-xs bg-blue-50 text-blue-600 px-2 py-1 rounded border border-blue-100">Beta</span>
+                            </div>
+                            
+                            <div className="grid md:grid-cols-2 gap-8">
+                                <div className="space-y-4">
+                                    <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Bot Token</label>
+                                    <input type="text" value={tgToken} onChange={(e) => setTgToken(e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm font-mono text-slate-600 bg-slate-50" placeholder="123456:ABC-DEF..." />
+                                    <p className="text-xs text-slate-400 mt-1">請向 @BotFather 申請</p>
+                                    </div>
+                                    <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Chat ID (通知接收群組/個人)</label>
+                                    <div className="flex gap-2">
+                                        <input type="text" value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} className="flex-1 p-2 border border-slate-300 rounded text-sm font-mono" placeholder="請點擊下方測試按鈕獲取" />
+                                        <button onClick={getTgUpdates} className="px-3 py-2 bg-slate-100 text-slate-600 rounded hover:bg-slate-200 text-xs font-medium whitespace-nowrap">1. 獲取 ID</button>
+                                    </div>
+                                    {tgTestStatus && <p className={`text-xs mt-1 ${tgTestStatus.includes('成功') ? 'text-green-600 font-bold' : 'text-orange-500'}`}>{tgTestStatus}</p>}
+                                    <p className="text-xs text-slate-400 mt-2">
+                                        💡 如何獲取 Chat ID?<br/>
+                                        1. 先用 Telegram 傳送任意訊息給您的機器人<br/>
+                                        2. 點擊上方的「獲取 ID」按鈕，系統將自動填入
+                                    </p>
+                                    </div>
+                                    <button onClick={() => sendTelegramMessage('🔔 測試通知：系統連線成功！')} disabled={!tgToken || !tgChatId} className="w-full py-2 bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center justify-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <Send size={14} /> 2. 發送測試訊息
+                                    </button>
+                                </div>
+
+                                <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 text-sm space-y-4">
+                                    <h3 className="font-semibold text-slate-700">🔔 通知觸發規則</h3>
+                                    <div className="space-y-3">
+                                    <div className="flex gap-3">
+                                        <div className="mt-0.5 bg-green-100 p-1.5 rounded text-green-600 h-fit"><Zap size={14} /></div>
+                                        <div>
+                                        <p className="font-medium text-slate-700">新任務通知</p>
+                                        <p className="text-xs text-slate-500 mt-0.5">當 B 欄位有新增內容時觸發。</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-3">
+                                        <div className="mt-0.5 bg-orange-100 p-1.5 rounded text-orange-600 h-fit"><AlertTriangle size={14} /></div>
+                                        <div>
+                                        <p className="font-medium text-slate-700">狀態異動通知</p>
+                                        <p className="text-xs text-slate-500 mt-0.5">當 J (反饋) 或 K (遲送) 欄位內容變更時觸發。</p>
+                                        </div>
+                                    </div>
+                                    </div>
+                                    <div className="pt-3 border-t border-slate-200">
+                                    <p className="text-xs text-slate-400">注意: 需開啟「自動刷新」功能才會持續在背景檢查異動。</p>
+                                    </div>
+                                </div>
+                                </div>
+                        </div>
+                        </div>
+                    </div>
+                    )}
+
+                </div>
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
