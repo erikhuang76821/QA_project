@@ -203,7 +203,9 @@
                 if (selectedMonth) {
                     targetData = targetData.filter(row => getMonthStr(row[2]) === selectedMonth);
                 }
-                let windowData = targetData.filter(row => row[5] === selectedWindow);
+                
+                // *優化: 篩選時同樣進行 trim() 處理，確保能匹配到正規化後的名稱
+                let windowData = targetData.filter(row => String(row[5] || '').trim() === selectedWindow || (!row[5] && selectedWindow === '未指定'));
 
                 if (caseFilter === 'issue') {
                 windowData = windowData.filter(row => isFeedbackCountable(row[8]));
@@ -306,9 +308,9 @@
                 const oldK = normalize(oldRow[9]); const newK = normalize(newRow[9]);
 
                 let changeDesc = '';
-                // 只有在正規化後的值不同時才發送通知
-                if (oldJ !== newJ) changeDesc += `\n狀況反饋(J): "${oldRow[8] || '無'}" ➔ "${newRow[8] || '無'}"`;
-                if (oldK !== newK) changeDesc += `\n遲送狀態(K): "${oldRow[9] || '無'}" ➔ "${newRow[9] || '無'}"`;
+                // 只有在正規化後的值不同時才發送通知 (修正1: 移除欄位代號)
+                if (oldJ !== newJ) changeDesc += `\n狀況反饋: "${oldRow[8] || '無'}" ➔ "${newRow[8] || '無'}"`;
+                if (oldK !== newK) changeDesc += `\n遲送狀態: "${oldRow[9] || '無'}" ➔ "${newRow[9] || '無'}"`;
 
                 if (changeDesc) {
                     const now = new Date();
@@ -419,6 +421,21 @@
                     if (sortConfig.key === 'type') { valA = a[0] || ''; valB = b[0] || ''; } 
                     else if (sortConfig.key === 'feedback') { valA = a[8] || ''; valB = b[8] || ''; } 
                     else if (sortConfig.key === 'row') { valA = a[1]; valB = b[1]; } // 改用單號(C欄位, Index 1)排序
+                    else if (sortConfig.key === 'date') { 
+                        // 解析日期字串為 timestamp 以確保正確排序
+                        const getTs = (v) => {
+                            const s = String(v || '');
+                            if (s.startsWith('Date(')) {
+                                const p = s.match(/Date\((\d+),(\d+),(\d+)\)/);
+                                return p ? new Date(parseInt(p[1]), parseInt(p[2]), parseInt(p[3])).getTime() : 0;
+                            }
+                            const d = new Date(s);
+                            return isNaN(d.getTime()) ? 0 : d.getTime();
+                        };
+                        return sortConfig.direction === 'asc' 
+                            ? getTs(a[2]) - getTs(b[2]) 
+                            : getTs(b[2]) - getTs(a[2]);
+                    }
                     else return 0;
 
                     if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
@@ -451,7 +468,9 @@
                 const windowStats = {}; const typeStats = {};
                 
                 targetData.forEach(row => {
-                const wName = row[5] || '未指定';
+                // *優化: 視為同一人的邏輯 (去除空白)
+                const wName = String(row[5] || '').trim() || '未指定';
+                
                 if (!windowStats[wName]) windowStats[wName] = { total: 0, feedback: 0, late: 0 };
                 windowStats[wName].total++;
                 if (isFeedbackCountable(row[8])) windowStats[wName].feedback++;
@@ -639,12 +658,14 @@
                                     <table className="w-full text-sm text-left">
                                     <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
                                         <tr>
+                                        {/* 修正2: 移除(B),(F),(D),(G),(J)欄位代號 */}
                                         <th className="p-3 w-20 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('row')}><div className="flex items-center justify-center gap-1">單號{getSortIcon('row')}</div></th>
-                                        <th className="p-3 w-32 cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('type')}><div className="flex items-center gap-1">專案別 (B){getSortIcon('type')}</div></th>
-                                        <th className="p-3 whitespace-nowrap">專案名稱 (F)</th>
-                                        <th className="p-3 w-32 whitespace-nowrap">送測日 (D)</th>
-                                        <th className="p-3 w-32 whitespace-nowrap">窗口 (G)</th>
-                                        <th className="p-3 min-w-[300px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋 (J){getSortIcon('feedback')}</div></th>
+                                        <th className="p-3 w-32 cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('type')}><div className="flex items-center gap-1">專案別{getSortIcon('type')}</div></th>
+                                        <th className="p-3 whitespace-nowrap">專案名稱</th>
+                                        {/* 修正3: 送測日增加排序功能 */}
+                                        <th className="p-3 w-32 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('date')}><div className="flex items-center gap-1">送測日{getSortIcon('date')}</div></th>
+                                        <th className="p-3 w-32 whitespace-nowrap">窗口</th>
+                                        <th className="p-3 min-w-[300px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋{getSortIcon('feedback')}</div></th>
                                         <th className="p-3 w-16 text-center">連結</th>
                                         </tr>
                                     </thead>
