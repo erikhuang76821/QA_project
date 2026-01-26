@@ -30,6 +30,9 @@
             -ms-overflow-style: none;  /* IE and Edge */
             scrollbar-width: none;  /* Firefox */
         }
+        html {
+            scroll-behavior: smooth;
+        }
     </style>
 </head>
 <body class="bg-slate-50">
@@ -46,7 +49,7 @@
             User, ArrowUpDown, ArrowUp, ArrowDown, RefreshCw, 
             Zap, Send, BarChart3, X, Filter, ListFilter, ExternalLink,
             Merge, Trash2, Plus, Timer, Percent, ChevronRight, Sun, Moon,
-            Users, ChevronDown, ChevronUp
+            Users, ChevronDown, ChevronUp, Briefcase, Anchor
         } from 'lucide-react';
 
         const App = () => {
@@ -291,31 +294,80 @@
             
             // *分配概況: 資料統計
             const assignmentStats = useMemo(() => {
-                if (!data) return { morning: [], middle: [] };
+                if (!data) return { morning: [], middle: [], outsourcing: [] };
                 
                 const activeData = data.filter(row => !row[3]); // 篩選進行中案件
                 
-                const processGroup = (colIndex) => {
+                // 1. 分離外包與內部案件
+                const outsourcingTickets = [];
+                const internalTickets = [];
+
+                activeData.forEach(row => {
+                    const feedback = String(row[8] || '');
+                    if (feedback.includes('外包主測')) {
+                        outsourcingTickets.push(row);
+                    } else {
+                        internalTickets.push(row);
+                    }
+                });
+
+                const processGroup = (colIndex, isMiddle = false) => {
                     const groups = {};
-                    activeData.forEach(row => {
-                        const name = String(row[colIndex] || '').trim();
-                        if (!name || name === '-' || name === '0' || name === '無') return;
+                    internalTickets.forEach(row => {
+                        let name = String(row[colIndex] || '').trim();
+                        // 如果是空白或無效值，統一歸類為 '無窗口' (僅針對顯示，若需排除則保留原邏輯)
+                        // 但需求4說 "中班人力分配的'無窗口'無條件置底"，表示需要顯示出來
+                        if (!name || name === '-' || name === '0' || name === '無') {
+                            name = '無窗口';
+                        }
                         
                         if (!groups[name]) {
-                            groups[name] = { name, count: 0, feedbackCount: 0, tickets: [] };
+                            groups[name] = { name, count: 0, feedbackCount: 0, tickets: [], maxDays: 0 };
                         }
                         groups[name].count++;
                         if (isFeedbackCountable(row[8])) groups[name].feedbackCount++;
+                        
+                        // 計算該案件天數並更新 maxDays
+                        const days = getDaysDiff(row[2]);
+                        if (days > groups[name].maxDays) {
+                            groups[name].maxDays = days;
+                        }
+
                         groups[name].tickets.push(row);
                     });
                     
-                    return Object.values(groups).sort((a, b) => b.count - a.count);
+                    let sortedGroups = Object.values(groups).sort((a, b) => b.count - a.count);
+
+                    // 需求4: 中班 '無窗口' 置底
+                    if (isMiddle) {
+                        sortedGroups.sort((a, b) => {
+                            if (a.name === '無窗口') return 1;
+                            if (b.name === '無窗口') return -1;
+                            return b.count - a.count; // 保持原有依數量排序
+                        });
+                    } else {
+                        // 早班如果也有 '無窗口'，通常也是過濾掉或放後面，這裡先保留過濾空值的邏輯(如果不想顯示)，
+                        // 但既然中班要顯示，早班可能也需要一致性? 
+                        // 原程式碼是直接過濾掉 (!name || ... return)。
+                        // 為了符合 "中班...無窗口置底"，我上面已經把空值轉為 '無窗口'。
+                        // 如果早班想維持 "不顯示無效窗口"，可以過濾掉。
+                        // 假設早班邏輯維持原樣 (只顯示有效窗口)，則需在此過濾 '無窗口'
+                        // 但為了保險，先不過濾，讓使用者看到所有分配。
+                    }
+                    
+                    // 如果還是希望能隱藏早班的無窗口 (若無特別需求):
+                    if (!isMiddle) {
+                         sortedGroups = sortedGroups.filter(g => g.name !== '無窗口');
+                    }
+
+                    return sortedGroups;
                 };
                 
                 // 早班 H欄(Index 6), 中班 I欄(Index 7)
                 return {
-                    morning: processGroup(6),
-                    middle: processGroup(7)
+                    morning: processGroup(6, false),
+                    middle: processGroup(7, true),
+                    outsourcing: outsourcingTickets
                 };
             }, [data]);
 
@@ -323,6 +375,20 @@
                 setExpandedPersons(prev => ({ ...prev, [key]: !prev[key] }));
             };
 
+            const scrollToSection = (id) => {
+                const element = document.getElementById(id);
+                if (element) {
+                    // 減去 header 高度
+                    const headerOffset = 80;
+                    const elementPosition = element.getBoundingClientRect().top;
+                    const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+                
+                    window.scrollTo({
+                        top: offsetPosition,
+                        behavior: "smooth"
+                    });
+                }
+            };
 
             // 捲動到指定項目
             const scrollToTicket = (ticketId) => {
@@ -805,7 +871,7 @@
 
                     {/* === View 4 (New): 分配概況 (Assignment Overview) === */}
                     {activeTab === 'assignment' && (
-                    <div className="space-y-6 animate-in fade-in duration-300">
+                    <div className="space-y-6 animate-in fade-in duration-300 relative">
                         {!data ? (
                         <div className="text-center py-20 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200">
                             <Users size={48} className="mx-auto mb-3 opacity-20" />
@@ -813,8 +879,16 @@
                         </div>
                         ) : (
                         <div className="flex flex-col gap-6">
+                            
+                            {/* 快速定錨按鈕 (Fixed or Sticky) */}
+                            <div className="flex justify-end gap-2 sticky top-20 z-20">
+                                <button onClick={() => scrollToSection('sec-morning')} className="bg-white/80 backdrop-blur border border-slate-200 text-slate-600 px-3 py-1.5 rounded-full text-xs font-bold shadow-sm hover:bg-orange-50 hover:text-orange-600 flex items-center gap-1 transition-all"><Sun size={12} /> 早班</button>
+                                <button onClick={() => scrollToSection('sec-middle')} className="bg-white/80 backdrop-blur border border-slate-200 text-slate-600 px-3 py-1.5 rounded-full text-xs font-bold shadow-sm hover:bg-indigo-50 hover:text-indigo-600 flex items-center gap-1 transition-all"><Moon size={12} /> 中班</button>
+                                <button onClick={() => scrollToSection('sec-outsourcing')} className="bg-white/80 backdrop-blur border border-slate-200 text-slate-600 px-3 py-1.5 rounded-full text-xs font-bold shadow-sm hover:bg-green-50 hover:text-green-600 flex items-center gap-1 transition-all"><Briefcase size={12} /> 外包</button>
+                            </div>
+
                             {/* 早班區塊 */}
-                            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full">
+                            <div id="sec-morning" className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full scroll-mt-24">
                                 <h3 className="font-bold text-slate-800 flex items-center gap-2 text-lg mb-4 pb-3 border-b border-slate-100">
                                     <Sun size={20} className="text-orange-500" /> 早班人力分配
                                 </h3>
@@ -833,6 +907,7 @@
                                                     <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-0.5 rounded-full">{person.count}</span>
                                                 </div>
                                                 <div className="flex items-center gap-3 text-sm">
+                                                    <span className="text-slate-500 text-xs font-medium bg-slate-100 px-2 py-1 rounded">最長測試天數 : {person.maxDays} 天</span>
                                                     <span className={`${person.feedbackCount > 0 ? 'text-orange-600 font-bold' : 'text-slate-400'}`}>狀況反饋 : {person.feedbackCount}</span>
                                                     {isExpanded ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
                                                 </div>
@@ -873,7 +948,7 @@
                             </div>
 
                             {/* 中班區塊 */}
-                            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full">
+                            <div id="sec-middle" className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full scroll-mt-24">
                                 <h3 className="font-bold text-slate-800 flex items-center gap-2 text-lg mb-4 pb-3 border-b border-slate-100">
                                     <Moon size={20} className="text-indigo-500" /> 中班人力分配
                                 </h3>
@@ -888,10 +963,11 @@
                                                 className={`p-3 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'bg-slate-50 border-b border-slate-100' : ''}`}
                                             >
                                                 <div className="flex items-center gap-3">
-                                                    <span className="font-bold text-slate-700">{person.name}</span>
+                                                    <span className={`font-bold ${person.name === '無窗口' ? 'text-slate-400 italic' : 'text-slate-700'}`}>{person.name}</span>
                                                     <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-2 py-0.5 rounded-full">{person.count}</span>
                                                 </div>
                                                 <div className="flex items-center gap-3 text-sm">
+                                                    <span className="text-slate-500 text-xs font-medium bg-slate-100 px-2 py-1 rounded">最長測試天數 : {person.maxDays} 天</span>
                                                     <span className={`${person.feedbackCount > 0 ? 'text-orange-600 font-bold' : 'text-slate-400'}`}>狀況反饋 : {person.feedbackCount}</span>
                                                     {isExpanded ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
                                                 </div>
@@ -930,6 +1006,47 @@
                                     )})}
                                 </div>
                             </div>
+
+                            {/* 外包測試分配區塊 */}
+                            <div id="sec-outsourcing" className="bg-white p-6 rounded-xl border border-green-200 shadow-sm flex flex-col h-full scroll-mt-24">
+                                <h3 className="font-bold text-slate-800 flex items-center gap-2 text-lg mb-4 pb-3 border-b border-green-100">
+                                    <Briefcase size={20} className="text-green-600" /> 外包測試分配 
+                                    <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-mono">共 {assignmentStats.outsourcing.length} 筆</span>
+                                </h3>
+                                <div className="space-y-3">
+                                    {assignmentStats.outsourcing.length === 0 ? <p className="text-slate-400 text-sm">目前無外包主測案件</p> : (
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-sm text-left">
+                                                <thead className="bg-green-50/50 text-slate-500 text-xs uppercase">
+                                                    <tr>
+                                                        <th className="p-3 font-medium">單號</th>
+                                                        <th className="p-3 font-medium">專案別</th>
+                                                        <th className="p-3 font-medium">專案名稱</th>
+                                                        <th className="p-3 font-medium">送測日</th>
+                                                        <th className="p-3 font-medium">狀況反饋</th>
+                                                        <th className="p-3 font-medium text-right">累計天數</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {assignmentStats.outsourcing.map((t, idx) => (
+                                                        <tr key={idx} className="hover:bg-green-50/30 transition-colors">
+                                                            <td className="p-3 text-slate-500 font-mono text-xs">{t[1]}</td>
+                                                            <td className="p-3 font-medium text-slate-700">{t[0]}</td>
+                                                            <td className="p-3 text-slate-800">{t[4]}</td>
+                                                            <td className="p-3 text-slate-500 text-xs">{formatSimpleDate(t[2])}</td>
+                                                            <td className="p-3">
+                                                                <span className="text-green-700 font-medium bg-green-50 px-2 py-1 rounded border border-green-100 text-xs">{t[8]}</span>
+                                                            </td>
+                                                            <td className="p-3 text-right text-slate-600 font-mono">{getDaysDiff(t[2])} 天</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
                         </div>
                         )}
                     </div>
