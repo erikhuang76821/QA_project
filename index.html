@@ -50,7 +50,7 @@
             User, ArrowUpDown, ArrowUp, ArrowDown, RefreshCw, 
             Zap, Send, BarChart3, X, Filter, ListFilter, ExternalLink,
             Merge, Trash2, Plus, Timer, Percent, ChevronRight, Sun, Moon,
-            Users, ChevronDown, ChevronUp, Briefcase, Anchor
+            Users, ChevronDown, ChevronUp, Briefcase, Anchor, Hourglass
         } from 'lucide-react';
 
         const App = () => {
@@ -89,6 +89,11 @@
             const [tgToken, setTgToken] = useState('7759005999:AAGynjlqnLPCk_zSVQi0AvtOtYOpWHQGHzA');
             const [tgChatId, setTgChatId] = useState('1326042316');
             const [tgTestStatus, setTgTestStatus] = useState(''); // 測試按鈕狀態
+
+            // Redmine 設定 (新增功能 1)
+            const [redmineToken, setRedmineToken] = useState('');
+            const [redmineData, setRedmineData] = useState({}); // { issueId: { spent: 0, estimated: 0 } }
+            const [loadingRedmine, setLoadingRedmine] = useState(false);
             
             // 比對用：儲存上一次的資料快照
             const prevDataRef = useRef(null);
@@ -474,7 +479,101 @@
                 } catch (e) { setTgTestStatus('連線失敗'); }
             };
 
-            // --- 4. 資料讀取 (Fetch) ---
+            // --- 4. Redmine 資料讀取 (利用 Proxy 策略) ---
+            const fetchRedmineData = useCallback(async (ticketIds) => {
+                if (!redmineToken || ticketIds.length === 0) return;
+                setLoadingRedmine(true);
+                const newRedmineData = { ...redmineData };
+                
+                const validIds = ticketIds.filter(id => id);
+                const uniqueIds = [...new Set(validIds)];
+
+                // 定義 Proxy 策略 (參考成功範例)
+                // 注意：將 API Key 放在 URL 參數中以便通過 Proxy 傳遞
+                const getStrategies = (targetUrl) => [
+                    { 
+                        name: "CodeTabs", 
+                        getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` 
+                    },
+                    { 
+                        name: "AllOrigins (JSON)", 
+                        getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` 
+                    },
+                    { 
+                        name: "CorsProxy.io", 
+                        getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` 
+                    }
+                ];
+
+                // 單一議題讀取函式
+                const fetchIssue = async (rawId) => {
+                    const id = String(rawId).trim();
+                    if (!id) return;
+
+                    // 1. 建構目標 URL (含 Key)
+                    const targetUrl = `https://igs.redmine-x.com/issues/${id}.json?key=${redmineToken}`;
+                    const strategies = getStrategies(targetUrl);
+
+                    for (const strategy of strategies) {
+                        try {
+                            const finalUrl = strategy.getUrl(targetUrl);
+                            const response = await fetch(finalUrl);
+                            
+                            if (!response.ok) continue; // 嘗試下一個策略
+
+                            const text = await response.text();
+                            
+                            // 檢查是否為 HTML 錯誤頁 (Redmine 常見行為)
+                            if (text.trim().startsWith("<") && text.includes("html")) {
+                                if (strategy.name !== "AllOrigins (JSON)") {
+                                    console.warn(`Redmine fetch warning for #${id}: Received HTML via ${strategy.name}`);
+                                    continue;
+                                }
+                            }
+
+                            let json;
+                            try {
+                                json = JSON.parse(text);
+                            } catch (e) { continue; }
+
+                            // 處理 AllOrigins 的 Wrapper
+                            let finalData = json;
+                            if (strategy.name === "AllOrigins (JSON)") {
+                                if (json.contents) {
+                                    try {
+                                        finalData = JSON.parse(json.contents);
+                                    } catch (e) { continue; }
+                                } else { continue; }
+                            }
+
+                            if (finalData && finalData.issue) {
+                                newRedmineData[id] = {
+                                    spent: parseFloat(finalData.issue.spent_hours) || 0,
+                                    estimated: parseFloat(finalData.issue.estimated_hours) || 0,
+                                    status: 'ok'
+                                };
+                                return; // 成功，結束此 ID 的處理
+                            }
+                        } catch (e) {
+                            // console.warn(`Strategy ${strategy.name} failed for #${id}`, e);
+                        }
+                    }
+                    
+                    // 若所有策略都失敗
+                    if (!newRedmineData[id]) {
+                        // 標記失敗，避免重複請求
+                        newRedmineData[id] = null; 
+                    }
+                };
+
+                // 批次執行 (為了避免瞬間過多請求，可以考慮分批，但這裡先用 Promise.all)
+                await Promise.all(uniqueIds.map(id => fetchIssue(id)));
+                
+                setRedmineData(newRedmineData);
+                setLoadingRedmine(false);
+            }, [redmineToken, redmineData]);
+
+            // --- 5. 資料讀取 (Fetch) ---
             const fetchData = useCallback(async (isAuto = false) => {
                 if (!spreadsheetId) return;
                 if (mode === 'api' && !apiKey) return;
@@ -501,11 +600,19 @@
                 const valuesWithMeta = values.map((row, index) => { const newRow = [...row]; newRow.push(currentStartRow + index); return newRow; });
                 const filteredValues = valuesWithMeta.filter(row => row[0] !== undefined && row[0] !== '' && row[0] !== null);
                 setData(filteredValues); setLastUpdatedTime(new Date());
+                
+                // 觸發 Redmine 資料讀取 (讀取 active 的單號)
+                const activeTicketIds = filteredValues.filter(row => !row[3]).map(row => row[1]); // C欄為單號
+                if (activeTicketIds.length > 0) {
+                    // 非同步呼叫，不阻擋 UI 顯示 Google Sheets 資料
+                    fetchRedmineData(activeTicketIds);
+                }
+
                 if (filteredValues.length > 0) checkAndNotify(filteredValues);
                 } catch (err) { console.error(err); if (!isAuto) setError(err.message); } finally { setLoading(false); }
-            }, [spreadsheetId, constructedRange, mode, apiKey, sheetName, startCol, endCol, startRow, endRow, checkAndNotify]);
+            }, [spreadsheetId, constructedRange, mode, apiKey, sheetName, startCol, endCol, startRow, endRow, checkAndNotify, fetchRedmineData]);
 
-            // --- 5. 自動刷新計時器 ---
+            // --- 6. 自動刷新計時器 ---
             useEffect(() => {
                 let timer = null; let counter = null;
                 if (autoRefresh && refreshInterval > 0) {
@@ -795,7 +902,15 @@
                             </div>
 
                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-[500px]">
-                                <div className="p-4 border-b border-slate-100 bg-slate-50/50"><h3 className="font-semibold text-slate-700">即時測試狀況清單</h3></div>
+                                <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                                    <h3 className="font-semibold text-slate-700">即時測試狀況清單</h3>
+                                    {loadingRedmine && (
+                                        <div className="flex items-center gap-2 text-xs text-slate-500">
+                                            <Loader2 size={14} className="animate-spin" />
+                                            讀取 Redmine 工時中...
+                                        </div>
+                                    )}
+                                </div>
                                 <div className="overflow-x-auto flex-1">
                                     <table className="w-full text-sm text-left">
                                     <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
@@ -811,17 +926,28 @@
                                         <th className="p-3 w-24 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('morning')}><div className="flex items-center gap-1">早班{getSortIcon('morning')}</div></th>
                                         <th className="p-3 w-24 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('middle')}><div className="flex items-center gap-1">中班{getSortIcon('middle')}</div></th>
                                         <th className="p-3 min-w-[300px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋{getSortIcon('feedback')}</div></th>
+                                        
+                                        {/* 新增功能: 工時欄位 */}
+                                        <th className="p-3 w-24 whitespace-nowrap"><div className="flex items-center gap-1">耗用工時</div></th>
+                                        <th className="p-3 w-24 whitespace-nowrap"><div className="flex items-center gap-1">預估工時</div></th>
+                                        
                                         <th className="p-3 w-16 text-center">連結</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-50">
                                         {activeStats.list.length === 0 ? (
-                                        <tr><td colSpan="9" className="p-8 text-center text-slate-400">目前沒有進行中的案件</td></tr>
+                                        <tr><td colSpan="11" className="p-8 text-center text-slate-400">目前沒有進行中的案件</td></tr>
                                         ) : (
                                         activeStats.list.map((row, i) => {
                                             const late = isLate(row);
                                             const ticketId = row[1]; // C欄位, index 1
                                             const isHighlighted = highlightId === ticketId;
+                                            
+                                            // Redmine 工時資料 (使用 trim 後的 ID 查詢)
+                                            const cleanId = String(ticketId).trim();
+                                            const rData = redmineData[cleanId];
+                                            const isOverBudget = rData && rData.spent > rData.estimated;
+
                                             return (
                                             <tr 
                                                 key={i} 
@@ -846,6 +972,21 @@
                                                         <span className="text-slate-400 text-xs">{row[8]} (正常)</span>
                                                     ) : <span className="text-slate-300">-</span>}
                                                 </td>
+                                                
+                                                {/* 新增功能: 工時顯示欄位 */}
+                                                <td className="p-3 align-top font-mono text-xs">
+                                                    {rData ? (
+                                                        <span className={isOverBudget ? 'text-red-600 font-bold' : 'text-slate-600'}>
+                                                            {rData.spent}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-slate-300">-</span>
+                                                    )}
+                                                </td>
+                                                <td className="p-3 align-top font-mono text-xs text-slate-500">
+                                                    {rData ? rData.estimated : <span className="text-slate-300">-</span>}
+                                                </td>
+
                                                 <td className="p-3 align-top text-center">
                                                     <a 
                                                     href={`https://igs.redmine-x.com/issues/${ticketId}`} 
@@ -1336,6 +1477,30 @@
 
                         {/* 右側: Telegram 通知設定 */}
                         <div className="lg:col-span-8 space-y-6">
+                        
+                        {/* Redmine 設定區塊 (新增位置) */}
+                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="font-semibold flex items-center gap-2 text-slate-700"><Hourglass size={18} className="text-purple-500" /> Redmine 工時整合</h2>
+                            </div>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">Redmine API Token</label>
+                                    <input 
+                                        type="password" 
+                                        value={redmineToken} 
+                                        onChange={(e) => setRedmineToken(e.target.value)} 
+                                        className="w-full p-2 border border-slate-300 rounded text-sm font-mono text-slate-600 bg-slate-50" 
+                                        placeholder="請輸入 Redmine API Token" 
+                                    />
+                                    <p className="text-xs text-slate-400 mt-1">請輸入redmine api token</p>
+                                </div>
+                                <div className="p-3 bg-purple-50 text-purple-700 text-xs rounded border border-purple-100">
+                                    <p>說明：系統會自動讀取單號，並透過 API 查詢 <span className="font-mono">igs.redmine-x.com</span> 的工時資訊。若耗用工時超過預估工時，將以紅色顯示。</p>
+                                </div>
+                            </div>
+                        </div>
+
                         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                             <div className="flex items-center justify-between mb-6">
                                 <h2 className="font-semibold flex items-center gap-2 text-slate-700"><Send size={18} className="text-blue-500" /> Telegram 異動通知機器人</h2>
