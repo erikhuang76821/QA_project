@@ -916,20 +916,20 @@
                                     <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
                                         <tr>
                                         {/* 修正2: 移除(B),(F),(D),(G),(J)欄位代號 */}
-                                        <th className="p-3 w-20 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('row')}><div className="flex items-center justify-center gap-1">單號{getSortIcon('row')}</div></th>
+                                        <th className="p-3 w-20 text-center cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('row')}><div className="flex items-center justify-center gap-1">#{getSortIcon('row')}</div></th>
                                         <th className="p-3 w-32 cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('type')}><div className="flex items-center gap-1">專案別{getSortIcon('type')}</div></th>
-                                        <th className="p-3 whitespace-nowrap">專案名稱</th>
+                                        <th className="p-3 min-w-[300px] whitespace-nowrap">專案名稱</th>
                                         {/* 修正3: 送測日增加排序功能 */}
                                         <th className="p-3 w-32 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('date')}><div className="flex items-center gap-1">送測日{getSortIcon('date')}</div></th>
-                                        <th className="p-3 w-24 whitespace-nowrap">窗口</th>
+                                        <th className="p-3 w-16 whitespace-nowrap">窗口</th>
                                         {/* 新增功能: 早班與中班欄位 */}
-                                        <th className="p-3 w-24 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('morning')}><div className="flex items-center gap-1">早班{getSortIcon('morning')}</div></th>
-                                        <th className="p-3 w-24 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('middle')}><div className="flex items-center gap-1">中班{getSortIcon('middle')}</div></th>
-                                        <th className="p-3 min-w-[300px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋{getSortIcon('feedback')}</div></th>
+                                        <th className="p-3 w-16 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('morning')}><div className="flex items-center gap-1">早班{getSortIcon('morning')}</div></th>
+                                        <th className="p-3 w-16 whitespace-nowrap cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('middle')}><div className="flex items-center gap-1">中班{getSortIcon('middle')}</div></th>
+                                        <th className="p-3 min-w-[180px] cursor-pointer hover:bg-slate-100 group" onClick={() => handleSort('feedback')}><div className="flex items-center gap-1">狀況反饋{getSortIcon('feedback')}</div></th>
                                         
                                         {/* 新增功能: 工時欄位 */}
-                                        <th className="p-3 w-24 whitespace-nowrap"><div className="flex items-center gap-1">耗用工時</div></th>
-                                        <th className="p-3 w-24 whitespace-nowrap"><div className="flex items-center gap-1">預估工時</div></th>
+                                        <th className="p-3 w-16 whitespace-nowrap"><div className="flex items-center gap-1">當前</div></th>
+                                        <th className="p-3 w-16 whitespace-nowrap"><div className="flex items-center gap-1">上限</div></th>
                                         
                                         <th className="p-3 w-16 text-center">連結</th>
                                         </tr>
@@ -1493,7 +1493,7 @@
                                         className="w-full p-2 border border-slate-300 rounded text-sm font-mono text-slate-600 bg-slate-50" 
                                         placeholder="請輸入 Redmine API Token" 
                                     />
-                                    <p className="text-xs text-slate-400 mt-1">請填入api token </p>
+                                    <p className="text-xs text-slate-400 mt-1">請填入Api token</p>
                                 </div>
                                 <div className="p-3 bg-purple-50 text-purple-700 text-xs rounded border border-purple-100">
                                     <p>說明：系統會自動讀取單號，並透過 API 查詢 <span className="font-mono">igs.redmine-x.com</span> 的工時資訊。若耗用工時超過預估工時，將以紅色顯示。</p>
