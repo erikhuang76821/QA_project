@@ -39,6 +39,18 @@
         html {
             scroll-behavior: smooth;
         }
+
+        /* Redmine 筆記 tooltip 動畫 */
+        @keyframes tooltipFadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes tooltipFadeOut {
+            from { opacity: 1; transform: translateY(0); }
+            to { opacity: 0; transform: translateY(4px); }
+        }
+        .note-tooltip-enter { animation: tooltipFadeIn 0.2s ease-out forwards; }
+        .note-tooltip-exit { animation: tooltipFadeOut 0.2s ease-in forwards; }
     </style>
 </head>
 
@@ -100,6 +112,11 @@
             const [redmineToken, setRedmineToken] = useState('');
             const [redmineData, setRedmineData] = useState({}); // { issueId: { spent: 0, estimated: 0 } }
             const [loadingRedmine, setLoadingRedmine] = useState(false);
+
+            // Redmine 筆記 (hover tooltip 用)
+            const [redmineNotes, setRedmineNotes] = useState({}); // { issueId: '最後一筆筆記內容' | null }
+            const [hoveredTicket, setHoveredTicket] = useState(null); // { id, x, y, leaving }
+            const hoverTimerRef = useRef(null);
 
             // 比對用：儲存上一次的資料快照
             const prevDataRef = useRef(null);
@@ -579,6 +596,82 @@
                 setLoadingRedmine(false);
             }, [redmineToken, redmineData]);
 
+            // --- 4.5 Redmine 筆記讀取 (hover tooltip 用) ---
+            const fetchRedmineNote = useCallback(async (issueId) => {
+                const cleanId = String(issueId).trim();
+                if (!redmineToken || !cleanId || redmineNotes[cleanId] !== undefined) return;
+                // 標記 loading 避免重複請求
+                setRedmineNotes(prev => ({ ...prev, [cleanId]: null }));
+
+                const targetUrl = `https://igs.redmine-x.com/issues/${cleanId}.json?key=${redmineToken}&include=journals`;
+                const strategies = [
+                    { name: "CodeTabs", getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
+                    { name: "AllOrigins (JSON)", getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
+                    { name: "CorsProxy.io", getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` }
+                ];
+
+                for (const strategy of strategies) {
+                    try {
+                        const finalUrl = strategy.getUrl(targetUrl);
+                        const response = await fetch(finalUrl);
+                        if (!response.ok) continue;
+                        const text = await response.text();
+                        if (text.trim().startsWith("<") && text.includes("html") && strategy.name !== "AllOrigins (JSON)") continue;
+
+                        let json;
+                        try { json = JSON.parse(text); } catch (e) { continue; }
+
+                        let finalData = json;
+                        if (strategy.name === "AllOrigins (JSON)") {
+                            if (json.contents) { try { finalData = JSON.parse(json.contents); } catch (e) { continue; } } else { continue; }
+                        }
+
+                        if (finalData && finalData.issue && finalData.issue.journals) {
+                            // 取最後一筆有 notes 的 journal
+                            const notesJournals = finalData.issue.journals.filter(j => j.notes && j.notes.trim());
+                            const lastNote = notesJournals.length > 0 ? notesJournals[notesJournals.length - 1].notes : '( 無筆記 )';
+                            setRedmineNotes(prev => ({ ...prev, [cleanId]: lastNote }));
+                            return;
+                        }
+                    } catch (e) { /* 嘗試下一個策略 */ }
+                }
+                setRedmineNotes(prev => ({ ...prev, [cleanId]: '( 讀取失敗 )' }));
+            }, [redmineToken, redmineNotes]);
+
+            // hover 處理函式 (分配概況專用)
+            const handleTicketHover = useCallback((ticketId, e) => {
+                if (!redmineToken) return;
+                clearTimeout(hoverTimerRef.current);
+                const rect = e.currentTarget.getBoundingClientRect();
+                setHoveredTicket({ id: String(ticketId).trim(), x: rect.left, y: rect.top - 8, leaving: false });
+                fetchRedmineNote(ticketId);
+            }, [redmineToken, fetchRedmineNote]);
+
+            const handleTicketLeave = useCallback(() => {
+                if (!redmineToken) return;
+                setHoveredTicket(prev => prev ? { ...prev, leaving: true } : null);
+                hoverTimerRef.current = setTimeout(() => setHoveredTicket(null), 250);
+            }, [redmineToken]);
+
+            // NoteTooltip 元件
+            const NoteTooltip = () => {
+                if (!hoveredTicket) return null;
+                const note = redmineNotes[hoveredTicket.id];
+                return (
+                    <div
+                        className={`fixed z-50 max-w-sm p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl pointer-events-none ${hoveredTicket.leaving ? 'note-tooltip-exit' : 'note-tooltip-enter'}`}
+                        style={{ left: hoveredTicket.x, top: hoveredTicket.y, transform: 'translateY(-100%)' }}
+                    >
+                        <div className="flex items-center gap-1.5 mb-1 text-slate-300 font-bold">
+                            <Info size={12} /> #{hoveredTicket.id} 最後筆記
+                        </div>
+                        <div className="text-slate-100 leading-relaxed whitespace-pre-wrap max-h-[200px] overflow-y-auto">
+                            {note === null ? '讀取中...' : note === undefined ? '' : note}
+                        </div>
+                    </div>
+                );
+            };
+
             // --- 5. 資料讀取 (Fetch) ---
             const fetchData = useCallback(async (isAuto = false) => {
                 if (!spreadsheetId) return;
@@ -857,10 +950,21 @@
                                 )}
                                 {activeStats && (
                                     <>
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                                             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col h-full min-h-[110px]">
                                                 <p className="text-xs text-slate-500 font-medium uppercase">測試中總數</p>
                                                 <p className="text-4xl font-bold text-slate-800 mt-2">{activeStats.count}</p>
+                                            </div>
+                                            <div className="bg-white p-4 rounded-xl border border-green-100 shadow-sm flex flex-col h-full min-h-[110px]">
+                                                <div className="flex justify-between items-start">
+                                                    <div>
+                                                        <p className="text-xs text-green-600 font-bold uppercase flex items-center gap-1">
+                                                            <Briefcase size={12} /> 外包數量
+                                                        </p>
+                                                        <p className="text-4xl font-bold text-green-600 mt-2">{assignmentStats.outsourcing.length}</p>
+                                                    </div>
+                                                    <Briefcase className="text-green-100" size={32} />
+                                                </div>
                                             </div>
                                             <div className="bg-white p-4 rounded-xl border border-red-100 shadow-sm flex flex-col h-full min-h-[110px]">
                                                 <div className="flex justify-between items-start">
@@ -1027,6 +1131,7 @@
                                     </div>
                                 ) : (
                                     <div className="flex flex-col gap-6">
+                                        <NoteTooltip />
 
                                         {/* 快速定錨按鈕 (Fixed or Sticky) */}
                                         <div className="flex justify-end gap-2 sticky top-20 z-20">
@@ -1076,7 +1181,7 @@
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
                                                                                 {person.tickets.map((t, ti) => (
-                                                                                    <tr key={ti}>
+                                                                                    <tr key={ti} onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave} className="cursor-default">
                                                                                         <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
                                                                                         <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
                                                                                         <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[7] || '-'}</td>
@@ -1142,7 +1247,7 @@
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
                                                                                 {person.tickets.map((t, ti) => (
-                                                                                    <tr key={ti}>
+                                                                                    <tr key={ti} onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave} className="cursor-default">
                                                                                         <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
                                                                                         <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
                                                                                         <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[6] || '-'}</td>
@@ -1189,7 +1294,7 @@
                                                             </thead>
                                                             <tbody className="divide-y divide-slate-100">
                                                                 {assignmentStats.outsourcing.map((t, idx) => (
-                                                                    <tr key={idx} className="hover:bg-green-50/30 transition-colors">
+                                                                    <tr key={idx} className="hover:bg-green-50/30 transition-colors cursor-default" onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave}>
                                                                         <td className="p-3 text-slate-500 font-mono text-xs">{t[1]}</td>
                                                                         <td className="p-3 font-medium text-slate-700">{t[0]}</td>
                                                                         <td className="p-3 text-slate-800">{t[4]}</td>
@@ -1218,8 +1323,7 @@
                                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
                                     <div><h2 className="text-lg font-bold text-slate-800">數據統計中心</h2><p className="text-xs text-slate-500 mt-1">月度報表與績效分析 (已排除外包協測/主測/測試)</p></div>
                                     <div className="flex items-center gap-2">
-                                        <div className="relative"><Calendar size={16} className="absolute left-3 top-2.5 text-slate-400" /><select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="w-full md:w-48 pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm"><option value="">全部月份 (All Time)</option>{analyticsStats?.months.map(m => (<option key={m} value={m}>{m}</option>))}</select></div>
-                                        <button onClick={() => fetchData()} className="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm hover:bg-slate-900">刷新</button>
+                                        <div className="relative"><Calendar size={16} className="absolute left-3 top-2.5 text-slate-400" /><select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="w-full md:w-64 pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm"><option value="">全部月份 (All Time)</option>{analyticsStats?.months.map(m => (<option key={m} value={m}>{m}</option>))}</select></div>
                                     </div>
                                 </div>
                                 {analyticsStats ? (
