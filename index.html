@@ -40,17 +40,7 @@
             scroll-behavior: smooth;
         }
 
-        /* Redmine 筆記 tooltip 動畫 */
-        @keyframes tooltipFadeIn {
-            from { opacity: 0; transform: translateY(4px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes tooltipFadeOut {
-            from { opacity: 1; transform: translateY(0); }
-            to { opacity: 0; transform: translateY(4px); }
-        }
-        .note-tooltip-enter { animation: tooltipFadeIn 0.2s ease-out forwards; }
-        .note-tooltip-exit { animation: tooltipFadeOut 0.2s ease-in forwards; }
+
     </style>
 </head>
 
@@ -113,10 +103,10 @@
             const [redmineData, setRedmineData] = useState({}); // { issueId: { spent: 0, estimated: 0 } }
             const [loadingRedmine, setLoadingRedmine] = useState(false);
 
-            // Redmine 筆記 (hover tooltip 用)
+            // Redmine 筆記 (點擊展開用)
             const [redmineNotes, setRedmineNotes] = useState({}); // { issueId: '最後一筆筆記內容' | null }
-            const [hoveredTicket, setHoveredTicket] = useState(null); // { id, x, y, leaving }
-            const hoverTimerRef = useRef(null);
+            // 點擊展開的 ticket (取代原本 hover tooltip)
+            const [expandedTickets, setExpandedTickets] = useState({});
 
             // 比對用：儲存上一次的資料快照
             const prevDataRef = useRef(null);
@@ -573,6 +563,7 @@
                                 newRedmineData[id] = {
                                     spent: parseFloat(finalData.issue.spent_hours) || 0,
                                     estimated: parseFloat(finalData.issue.estimated_hours) || 0,
+                                    dueDate: finalData.issue.due_date || null,
                                     status: 'ok'
                                 };
                                 return; // 成功，結束此 ID 的處理
@@ -638,37 +629,67 @@
                 setRedmineNotes(prev => ({ ...prev, [cleanId]: '( 讀取失敗 )' }));
             }, [redmineToken, redmineNotes]);
 
-            // hover 處理函式 (分配概況專用)
-            const handleTicketHover = useCallback((ticketId, e) => {
-                if (!redmineToken) return;
-                clearTimeout(hoverTimerRef.current);
-                const rect = e.currentTarget.getBoundingClientRect();
-                setHoveredTicket({ id: String(ticketId).trim(), x: rect.left, y: rect.top - 8, leaving: false });
-                fetchRedmineNote(ticketId);
-            }, [redmineToken, fetchRedmineNote]);
+            // 點擊展開/收合 ticket 詳情 (取代原本 hover tooltip)
+            const toggleTicketExpand = useCallback((ticketId) => {
+                const cleanId = String(ticketId).trim();
+                setExpandedTickets(prev => {
+                    const next = { ...prev };
+                    if (next[cleanId]) {
+                        delete next[cleanId];
+                    } else {
+                        next[cleanId] = true;
+                        // 展開時觸發筆記讀取
+                        fetchRedmineNote(cleanId);
+                    }
+                    return next;
+                });
+            }, [fetchRedmineNote]);
 
-            const handleTicketLeave = useCallback(() => {
-                if (!redmineToken) return;
-                setHoveredTicket(prev => prev ? { ...prev, leaving: true } : null);
-                hoverTimerRef.current = setTimeout(() => setHoveredTicket(null), 250);
-            }, [redmineToken]);
+            // 計算剩餘天數 (完成日期 - 今日，可為負)
+            const getRemainingDays = (dueDateStr) => {
+                if (!dueDateStr) return null;
+                const due = new Date(dueDateStr);
+                if (isNaN(due.getTime())) return null;
+                const now = new Date();
+                now.setHours(0, 0, 0, 0);
+                due.setHours(0, 0, 0, 0);
+                return Math.round((due - now) / (1000 * 60 * 60 * 24));
+            };
 
-            // NoteTooltip 元件
-            const NoteTooltip = () => {
-                if (!hoveredTicket) return null;
-                const note = redmineNotes[hoveredTicket.id];
+            // 展開的 ticket 詳情列元件
+            const TicketDetailRow = ({ ticketId, colSpan }) => {
+                const cleanId = String(ticketId).trim();
+                const note = redmineNotes[cleanId];
+                const rd = redmineData[cleanId];
+                const dueDate = rd?.dueDate || null;
+                const remainDays = getRemainingDays(dueDate);
+
                 return (
-                    <div
-                        className={`fixed z-50 max-w-sm p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl pointer-events-none ${hoveredTicket.leaving ? 'note-tooltip-exit' : 'note-tooltip-enter'}`}
-                        style={{ left: hoveredTicket.x, top: hoveredTicket.y, transform: 'translateY(-100%)' }}
-                    >
-                        <div className="flex items-center gap-1.5 mb-1 text-slate-300 font-bold">
-                            <Info size={12} /> #{hoveredTicket.id} 最後筆記
-                        </div>
-                        <div className="text-slate-100 leading-relaxed whitespace-pre-wrap max-h-[200px] overflow-y-auto">
-                            {note === null ? '讀取中...' : note === undefined ? '' : note}
-                        </div>
-                    </div>
+                    <tr className="bg-slate-50 border-t border-slate-100">
+                        <td colSpan={colSpan} className="p-0">
+                            <div className="px-4 py-3 flex gap-4 items-start text-xs animate-in slide-in-from-top-1 duration-150">
+                                {/* 最後一則筆記 (較寬) */}
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-slate-400 font-bold mb-1 flex items-center gap-1"><Info size={11} /> 最後筆記</div>
+                                    <div className="text-slate-700 leading-relaxed whitespace-pre-wrap max-h-[120px] overflow-y-auto bg-white rounded border border-slate-100 p-2">
+                                        {note === null ? <span className="text-slate-400 italic">讀取中...</span> : note === undefined ? <span className="text-slate-300">-</span> : note}
+                                    </div>
+                                </div>
+                                {/* 完成日期 */}
+                                <div className="shrink-0 w-24 text-center">
+                                    <div className="text-slate-400 font-bold mb-1">完成日期</div>
+                                    <div className="text-slate-700 font-mono">{dueDate || <span className="text-slate-300">-</span>}</div>
+                                </div>
+                                {/* 剩餘天數 */}
+                                <div className="shrink-0 w-24 text-center">
+                                    <div className="text-slate-400 font-bold mb-1">剩餘天數</div>
+                                    <div className={`font-mono font-bold ${remainDays !== null && remainDays < 0 ? 'text-red-600' : 'text-slate-700'}`}>
+                                        {remainDays !== null ? `${remainDays} 天` : <span className="text-slate-300">-</span>}
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
                 );
             };
 
@@ -1131,7 +1152,7 @@
                                     </div>
                                 ) : (
                                     <div className="flex flex-col gap-6">
-                                        <NoteTooltip />
+
 
                                         {/* 快速定錨按鈕 (Fixed or Sticky) */}
                                         <div className="flex justify-end gap-2 sticky top-20 z-20">
@@ -1180,22 +1201,29 @@
                                                                                 </tr>
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
-                                                                                {person.tickets.map((t, ti) => (
-                                                                                    <tr key={ti} onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave} className="cursor-default">
-                                                                                        <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
-                                                                                        <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
-                                                                                        <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[7] || '-'}</td>
-                                                                                        <td className="py-2 align-top break-words">
-                                                                                            {isFeedbackCountable(t[8]) ? <span className="text-orange-600 font-medium">{t[8]}</span> : <span className="text-slate-300">-</span>}
-                                                                                        </td>
-                                                                                        <td className="py-2 text-right align-top font-mono">
-                                                                                            {(() => { const rd = redmineData[String(t[1]).trim()]; if (!rd) return <span className="text-slate-300">-</span>; const remain = rd.estimated - rd.spent; return <span className={remain < 0 ? 'text-red-600 font-bold' : 'text-green-600'}>{remain.toFixed(1)}h</span>; })()}
-                                                                                        </td>
-                                                                                        <td className="py-2 text-right align-top text-slate-600 font-mono">
-                                                                                            {getDaysDiff(t[2])} 天
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                ))}
+                                                                                {person.tickets.map((t, ti) => {
+                                                                                    const tId = String(t[1]).trim();
+                                                                                    const isTicketExpanded = expandedTickets[tId];
+                                                                                    return (
+                                                                                        <React.Fragment key={ti}>
+                                                                                            <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-blue-50/50 transition-colors ${isTicketExpanded ? 'bg-blue-50/30' : ''}`}>
+                                                                                                <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
+                                                                                                <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
+                                                                                                <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[7] || '-'}</td>
+                                                                                                <td className="py-2 align-top break-words">
+                                                                                                    {isFeedbackCountable(t[8]) ? <span className="text-orange-600 font-medium">{t[8]}</span> : <span className="text-slate-300">-</span>}
+                                                                                                </td>
+                                                                                                <td className="py-2 text-right align-top font-mono">
+                                                                                                    {(() => { const rd = redmineData[String(t[1]).trim()]; if (!rd) return <span className="text-slate-300">-</span>; const remain = rd.estimated - rd.spent; return <span className={remain < 0 ? 'text-red-600 font-bold' : 'text-green-600'}>{remain.toFixed(1)}h</span>; })()}
+                                                                                                </td>
+                                                                                                <td className="py-2 text-right align-top text-slate-600 font-mono">
+                                                                                                    {getDaysDiff(t[2])} 天
+                                                                                                </td>
+                                                                                            </tr>
+                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                                        </React.Fragment>
+                                                                                    );
+                                                                                })}
                                                                             </tbody>
                                                                         </table>
                                                                     </div>
@@ -1246,22 +1274,29 @@
                                                                                 </tr>
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
-                                                                                {person.tickets.map((t, ti) => (
-                                                                                    <tr key={ti} onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave} className="cursor-default">
-                                                                                        <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
-                                                                                        <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
-                                                                                        <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[6] || '-'}</td>
-                                                                                        <td className="py-2 align-top break-words">
-                                                                                            {isFeedbackCountable(t[8]) ? <span className="text-orange-600 font-medium">{t[8]}</span> : <span className="text-slate-300">-</span>}
-                                                                                        </td>
-                                                                                        <td className="py-2 text-right align-top font-mono">
-                                                                                            {(() => { const rd = redmineData[String(t[1]).trim()]; if (!rd) return <span className="text-slate-300">-</span>; const remain = rd.estimated - rd.spent; return <span className={remain < 0 ? 'text-red-600 font-bold' : 'text-green-600'}>{remain.toFixed(1)}h</span>; })()}
-                                                                                        </td>
-                                                                                        <td className="py-2 text-right align-top text-slate-600 font-mono">
-                                                                                            {getDaysDiff(t[2])} 天
-                                                                                        </td>
-                                                                                    </tr>
-                                                                                ))}
+                                                                                {person.tickets.map((t, ti) => {
+                                                                                    const tId = String(t[1]).trim();
+                                                                                    const isTicketExpanded = expandedTickets[tId];
+                                                                                    return (
+                                                                                        <React.Fragment key={ti}>
+                                                                                            <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-indigo-50/50 transition-colors ${isTicketExpanded ? 'bg-indigo-50/30' : ''}`}>
+                                                                                                <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
+                                                                                                <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
+                                                                                                <td className="py-2 whitespace-nowrap align-top text-slate-500">{t[6] || '-'}</td>
+                                                                                                <td className="py-2 align-top break-words">
+                                                                                                    {isFeedbackCountable(t[8]) ? <span className="text-orange-600 font-medium">{t[8]}</span> : <span className="text-slate-300">-</span>}
+                                                                                                </td>
+                                                                                                <td className="py-2 text-right align-top font-mono">
+                                                                                                    {(() => { const rd = redmineData[String(t[1]).trim()]; if (!rd) return <span className="text-slate-300">-</span>; const remain = rd.estimated - rd.spent; return <span className={remain < 0 ? 'text-red-600 font-bold' : 'text-green-600'}>{remain.toFixed(1)}h</span>; })()}
+                                                                                                </td>
+                                                                                                <td className="py-2 text-right align-top text-slate-600 font-mono">
+                                                                                                    {getDaysDiff(t[2])} 天
+                                                                                                </td>
+                                                                                            </tr>
+                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                                        </React.Fragment>
+                                                                                    );
+                                                                                })}
                                                                             </tbody>
                                                                         </table>
                                                                     </div>
@@ -1293,18 +1328,25 @@
                                                                 </tr>
                                                             </thead>
                                                             <tbody className="divide-y divide-slate-100">
-                                                                {assignmentStats.outsourcing.map((t, idx) => (
-                                                                    <tr key={idx} className="hover:bg-green-50/30 transition-colors cursor-default" onMouseEnter={(e) => handleTicketHover(t[1], e)} onMouseLeave={handleTicketLeave}>
-                                                                        <td className="p-3 text-slate-500 font-mono text-xs">{t[1]}</td>
-                                                                        <td className="p-3 font-medium text-slate-700">{t[0]}</td>
-                                                                        <td className="p-3 text-slate-800">{t[4]}</td>
-                                                                        <td className="p-3 text-slate-500 text-xs">{formatSimpleDate(t[2])}</td>
-                                                                        <td className="p-3">
-                                                                            <span className="text-green-700 font-medium bg-green-50 px-2 py-1 rounded border border-green-100 text-xs">{t[8]}</span>
-                                                                        </td>
-                                                                        <td className="p-3 text-right text-slate-600 font-mono">{getDaysDiff(t[2])} 天</td>
-                                                                    </tr>
-                                                                ))}
+                                                                {assignmentStats.outsourcing.map((t, idx) => {
+                                                                    const tId = String(t[1]).trim();
+                                                                    const isTicketExpanded = expandedTickets[tId];
+                                                                    return (
+                                                                        <React.Fragment key={idx}>
+                                                                            <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-green-50/30 transition-colors ${isTicketExpanded ? 'bg-green-50/30' : ''}`}>
+                                                                                <td className="p-3 text-slate-500 font-mono text-xs">{t[1]}</td>
+                                                                                <td className="p-3 font-medium text-slate-700">{t[0]}</td>
+                                                                                <td className="p-3 text-slate-800">{t[4]}</td>
+                                                                                <td className="p-3 text-slate-500 text-xs">{formatSimpleDate(t[2])}</td>
+                                                                                <td className="p-3">
+                                                                                    <span className="text-green-700 font-medium bg-green-50 px-2 py-1 rounded border border-green-100 text-xs">{t[8]}</span>
+                                                                                </td>
+                                                                                <td className="p-3 text-right text-slate-600 font-mono">{getDaysDiff(t[2])} 天</td>
+                                                                            </tr>
+                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                        </React.Fragment>
+                                                                    );
+                                                                })}
                                                             </tbody>
                                                         </table>
                                                     </div>
