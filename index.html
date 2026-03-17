@@ -49,7 +49,7 @@
 
     <!-- 你的程式碼邏輯放在這裡 -->
     <script type="text/babel" data-type="module">
-        import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+        import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
         import { createRoot } from 'react-dom/client';
         import {
             FileSpreadsheet, Table, Search, AlertCircle, Key, Check,
@@ -984,12 +984,24 @@
             // --- 案件排程：甘特圖元件 ---
             const GanttChartView = () => {
                 const ganttRef = useRef(null);
-                const [dragState, setDragState] = useState(null);
-                const panRef = useRef(null); // 用 ref 避免 re-render 導致捲動跳回
+                const scrollPosRef = useRef({ left: 0, top: 0 });
+                const dragActiveRef = useRef(false); // 追蹤拖曳中（不觸發 re-render）
+                const panRef = useRef(null);
                 const [hoverIssueId, setHoverIssueId] = useState(null);
                 const [hoverBarIssueId, setHoverBarIssueId] = useState(null);
                 const [updating, setUpdating] = useState(false);
                 const [collapsedDays, setCollapsedDays] = useState({}); // Y軸按開始日分組收折
+
+                // 每次 re-render 後用 rAF 還原 scroll 位置（防止 React 重建 DOM 導致回彈）
+                useEffect(() => {
+                    const saved = scrollPosRef.current;
+                    requestAnimationFrame(() => {
+                        if (ganttRef.current && saved) {
+                            if (ganttRef.current.scrollLeft !== saved.left) ganttRef.current.scrollLeft = saved.left;
+                            if (ganttRef.current.scrollTop !== saved.top) ganttRef.current.scrollTop = saved.top;
+                        }
+                    });
+                });
 
                 const today = useMemo(() => {
                     const d = new Date(); d.setHours(0,0,0,0); return d;
@@ -1078,6 +1090,7 @@
                 const dragPendingRef = useRef(null);
 
                 const handleMouseDown = (e, issue, mode) => {
+                    if (e.button !== 0) return; // 僅左鍵
                     e.preventDefault();
                     e.stopPropagation();
                     const pos = getBarPosition(issue);
@@ -1137,18 +1150,19 @@
                             setGanttPendingUpdate(dragPendingRef.current);
                         }
                         dragPendingRef.current = null;
-                        setDragState(null);
+                        dragActiveRef.current = false;
                         window.removeEventListener('mousemove', handleMouseMove);
                         window.removeEventListener('mouseup', handleMouseUp);
                     };
 
-                    setDragState({ issueId: issue.id, mode }); // 僅標記正在拖曳（隱藏 tooltip 等）
+                    dragActiveRef.current = true; // 僅標記正在拖曳（不觸發 re-render）
                     window.addEventListener('mousemove', handleMouseMove);
                     window.addEventListener('mouseup', handleMouseUp);
                 };
 
                 // --- 空白區域拖曳捲動（用 ref 避免 re-render） ---
                 const handlePanStart = (e) => {
+                    if (e.button !== 0) return; // 僅左鍵
                     if (!ganttRef.current) return;
                     panRef.current = {
                         startX: e.clientX,
@@ -1280,6 +1294,7 @@
                             style={{ maxHeight: '75vh' }}
                             onMouseDown={handlePanStart}
                             onContextMenu={(e) => e.preventDefault()}
+                            onScroll={(e) => { scrollPosRef.current = { left: e.target.scrollLeft, top: e.target.scrollTop }; }}
                         >
                             <div style={{ minWidth: leftPanelWidth + totalGanttWidth }}>
                                 {/* Sticky 日期標頭列 */}
@@ -1395,12 +1410,12 @@
                                                         <div className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-l-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-left')} />
                                                         <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-r-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-right')} />
                                                     </div>
-                                                    {hoverBarIssueId === issue.id && !dragState && (
+                                                    {hoverBarIssueId === issue.id && !dragActiveRef.current && (
                                                         <div className="absolute -top-8 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-[11px] px-3 py-1.5 rounded-lg shadow-xl whitespace-nowrap pointer-events-none">
                                                             <span className="text-slate-300">分派:</span> <span className="font-bold text-emerald-300">{issue.assigned_to?.name || '未分派'}</span>
                                                         </div>
                                                     )}
-                                                    {isPending && !dragState && (
+                                                    {isPending && !dragActiveRef.current && (
                                                         <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-40 flex items-center gap-1 whitespace-nowrap">
                                                             <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-200 font-mono">{ganttPendingUpdate.newStart} ~ {ganttPendingUpdate.newEnd}</span>
                                                             <button onClick={(e) => { e.stopPropagation(); confirmUpdate(); }} disabled={updating}
