@@ -58,7 +58,8 @@
             User, ArrowUpDown, ArrowUp, ArrowDown, RefreshCw,
             Zap, Send, BarChart3, X, Filter, ListFilter, ExternalLink,
             Merge, Trash2, Plus, Timer, Percent, ChevronRight, Sun, Moon,
-            Users, ChevronDown, ChevronUp, Briefcase, Anchor, Hourglass
+            Users, ChevronDown, ChevronUp, Briefcase, Anchor, Hourglass,
+            GanttChart, GripHorizontal
         } from 'lucide-react';
 
         const App = () => {
@@ -140,6 +141,12 @@
 
             // 分配概況展開狀態
             const [expandedPersons, setExpandedPersons] = useState({});
+
+            // --- 案件排程甘特圖 state ---
+            const [ganttIssues, setGanttIssues] = useState([]);
+            const [ganttLoading, setGanttLoading] = useState(false);
+            // 拖曳暫存: { issueId, newStart, newEnd, originalStart, originalEnd }
+            const [ganttPendingUpdate, setGanttPendingUpdate] = useState(null);
 
             // --- 2. 輔助邏輯 ---
 
@@ -910,6 +917,475 @@
                 }).filter(Boolean));
             };
 
+            // --- 案件排程：Redmine Query 資料拉取 ---
+            const fetchGanttData = useCallback(async () => {
+                if (!redmineToken) return;
+                setGanttLoading(true);
+                const targetUrl = `https://igs.redmine-x.com/projects/old_ts_test/issues.json?query_id=1736&key=${redmineToken}&limit=100&sort=start_date:asc`;
+                const strategies = [
+                    { name: "CodeTabs", getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
+                    { name: "AllOrigins (JSON)", getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
+                    { name: "CorsProxy.io", getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` }
+                ];
+                for (const strategy of strategies) {
+                    try {
+                        const finalUrl = strategy.getUrl(targetUrl);
+                        const response = await fetch(finalUrl);
+                        if (!response.ok) continue;
+                        const text = await response.text();
+                        if (text.trim().startsWith("<") && text.includes("html") && strategy.name !== "AllOrigins (JSON)") continue;
+                        let json; try { json = JSON.parse(text); } catch (e) { continue; }
+                        let finalData = json;
+                        if (strategy.name === "AllOrigins (JSON)") {
+                            if (json.contents) { try { finalData = JSON.parse(json.contents); } catch (e) { continue; } } else { continue; }
+                        }
+                        if (finalData && finalData.issues) {
+                            setGanttIssues(finalData.issues);
+                            setGanttLoading(false);
+                            return;
+                        }
+                    } catch (e) { /* 嘗試下一個策略 */ }
+                }
+                setGanttLoading(false);
+            }, [redmineToken]);
+
+            // 切到排程 tab 時自動載入
+            useEffect(() => {
+                if (activeTab === 'schedule' && redmineToken && ganttIssues.length === 0) {
+                    fetchGanttData();
+                }
+            }, [activeTab, redmineToken]);
+
+            // --- 案件排程：Redmine PUT 更新日期 ---
+            const updateIssueDates = useCallback(async (issueId, startDate, dueDate) => {
+                if (!redmineToken) return false;
+                const targetUrl = `https://igs.redmine-x.com/issues/${issueId}.json?key=${redmineToken}`;
+                const body = JSON.stringify({ issue: { start_date: startDate, due_date: dueDate || '' } });
+                const strategies = [
+                    { name: "CorsProxy.io", getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` },
+                    { name: "AllOrigins (JSON)", getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` }
+                ];
+                for (const strategy of strategies) {
+                    try {
+                        const finalUrl = strategy.getUrl(targetUrl);
+                        const response = await fetch(finalUrl, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body
+                        });
+                        if (response.ok || response.status === 204 || response.status === 200) {
+                            return true;
+                        }
+                    } catch (e) { /* 嘗試下一個策略 */ }
+                }
+                return false;
+            }, [redmineToken]);
+
+            // --- 案件排程：甘特圖元件 ---
+            const GanttChartView = () => {
+                const ganttRef = useRef(null);
+                const [dragState, setDragState] = useState(null);
+                const [panState, setPanState] = useState(null);
+                const [hoverIssueId, setHoverIssueId] = useState(null);
+                const [hoverBarIssueId, setHoverBarIssueId] = useState(null);
+                const [updating, setUpdating] = useState(false);
+                const [collapsedDays, setCollapsedDays] = useState({}); // Y軸按開始日分組收折
+
+                const today = useMemo(() => {
+                    const d = new Date(); d.setHours(0,0,0,0); return d;
+                }, []);
+                const ganttDays = 14;
+                const dayWidth = 80;
+                const rowHeight = 44;
+                const groupHeaderHeight = 30; // 分組標頭高度
+                const leftPanelWidth = 400; // 加寬左側欄
+
+                const dateRange = useMemo(() => {
+                    const dates = [];
+                    for (let i = 0; i < ganttDays; i++) {
+                        const d = new Date(today);
+                        d.setDate(d.getDate() + i);
+                        dates.push(d);
+                    }
+                    return dates;
+                }, [today]);
+
+                const totalGanttWidth = ganttDays * dayWidth;
+
+                const formatDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                const parseDate = (str) => { if (!str) return null; const d = new Date(str + 'T00:00:00'); return isNaN(d.getTime()) ? null : d; };
+
+                // Y軸按開始日分組收折
+                const toggleCollapseDay = (dateStr) => {
+                    setCollapsedDays(prev => ({ ...prev, [dateStr]: !prev[dateStr] }));
+                };
+
+                // 按開始日分組的行資料
+                const groupedData = useMemo(() => {
+                    const groups = {};
+                    ganttIssues.forEach(issue => {
+                        const key = issue.start_date || 'no-date';
+                        if (!groups[key]) groups[key] = [];
+                        groups[key].push(issue);
+                    });
+                    const sortedKeys = Object.keys(groups).sort();
+                    const rows = [];
+                    sortedKeys.forEach(key => {
+                        const issues = groups[key];
+                        rows.push({ type: 'header', date: key, count: issues.length });
+                        if (!collapsedDays[key]) {
+                            issues.forEach(issue => rows.push({ type: 'issue', issue }));
+                        }
+                    });
+                    return rows;
+                }, [ganttIssues, collapsedDays]);
+
+                // 累積 Y 偏移
+                const rowYOffsets = useMemo(() => {
+                    let acc = 0;
+                    return groupedData.map(row => {
+                        const y = acc;
+                        acc += row.type === 'header' ? groupHeaderHeight : rowHeight;
+                        return y;
+                    });
+                }, [groupedData]);
+                const totalBodyHeight = groupedData.length > 0
+                    ? rowYOffsets[rowYOffsets.length - 1] + (groupedData[groupedData.length - 1].type === 'header' ? groupHeaderHeight : rowHeight)
+                    : 0;
+
+                // 取得 bar 位置（簡化：固定 dayWidth）
+                const getBarPosition = (issue) => {
+                    const pending = ganttPendingUpdate && ganttPendingUpdate.issueId === issue.id ? ganttPendingUpdate : null;
+                    const startStr = pending ? pending.newStart : issue.start_date;
+                    const endStr = pending ? pending.newEnd : issue.due_date;
+                    const start = parseDate(startStr);
+                    const end = parseDate(endStr);
+                    if (!start) return null;
+                    const startDiff = Math.floor((start - today) / (1000*60*60*24));
+                    const endDate = end || start;
+                    const endDiff = Math.floor((endDate - today) / (1000*60*60*24));
+                    const duration = endDiff - startDiff + 1;
+                    return {
+                        left: startDiff * dayWidth,
+                        width: Math.max(duration, 1) * dayWidth - 4,
+                        startDate: start,
+                        endDate: endDate,
+                        duration: Math.max(duration, 1)
+                    };
+                };
+
+                // 滑鼠互動處理
+                const handleMouseDown = (e, issue, mode) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const pos = getBarPosition(issue);
+                    if (!pos) return;
+                    setDragState({
+                        issueId: issue.id,
+                        mode,
+                        startX: e.clientX,
+                        origStartDate: pos.startDate,
+                        origEndDate: pos.endDate
+                    });
+                };
+
+                useEffect(() => {
+                    if (!dragState) return;
+                    const handleMouseMove = (e) => {
+                        const dx = e.clientX - dragState.startX;
+                        const daysDelta = Math.round(dx / dayWidth);
+                        if (daysDelta === 0 && !ganttPendingUpdate) return;
+
+                        let newStart = new Date(dragState.origStartDate);
+                        let newEnd = new Date(dragState.origEndDate);
+
+                        if (dragState.mode === 'move') {
+                            newStart.setDate(newStart.getDate() + daysDelta);
+                            newEnd.setDate(newEnd.getDate() + daysDelta);
+                        } else if (dragState.mode === 'resize-left') {
+                            newStart.setDate(newStart.getDate() + daysDelta);
+                            if (newStart > newEnd) newStart = new Date(newEnd);
+                        } else if (dragState.mode === 'resize-right') {
+                            newEnd.setDate(newEnd.getDate() + daysDelta);
+                            if (newEnd < newStart) newEnd = new Date(newStart);
+                        }
+
+                        setGanttPendingUpdate({
+                            issueId: dragState.issueId,
+                            newStart: formatDateStr(newStart),
+                            newEnd: formatDateStr(newEnd),
+                            originalStart: formatDateStr(dragState.origStartDate),
+                            originalEnd: formatDateStr(dragState.origEndDate)
+                        });
+                    };
+                    const handleMouseUp = () => {
+                        setDragState(null);
+                    };
+                    window.addEventListener('mousemove', handleMouseMove);
+                    window.addEventListener('mouseup', handleMouseUp);
+                    return () => {
+                        window.removeEventListener('mousemove', handleMouseMove);
+                        window.removeEventListener('mouseup', handleMouseUp);
+                    };
+                }, [dragState]);
+
+                // --- 空白區域拖曳捲動 ---
+                const handlePanStart = (e) => {
+                    // 僅在空白區域觸發（bar 的 mousedown 已 stopPropagation）
+                    if (!ganttRef.current) return;
+                    setPanState({
+                        startX: e.clientX,
+                        startY: e.clientY,
+                        scrollLeft: ganttRef.current.scrollLeft,
+                        scrollTop: ganttRef.current.scrollTop
+                    });
+                    e.preventDefault();
+                };
+
+                useEffect(() => {
+                    if (!panState) return;
+                    const handlePanMove = (e) => {
+                        if (!ganttRef.current) return;
+                        ganttRef.current.scrollLeft = panState.scrollLeft - (e.clientX - panState.startX);
+                        ganttRef.current.scrollTop = panState.scrollTop - (e.clientY - panState.startY);
+                    };
+                    const handlePanEnd = () => setPanState(null);
+                    window.addEventListener('mousemove', handlePanMove);
+                    window.addEventListener('mouseup', handlePanEnd);
+                    return () => { window.removeEventListener('mousemove', handlePanMove); window.removeEventListener('mouseup', handlePanEnd); };
+                }, [panState]);
+
+                // 確認更新
+                const confirmUpdate = async () => {
+                    if (!ganttPendingUpdate) return;
+                    setUpdating(true);
+                    const ok = await updateIssueDates(ganttPendingUpdate.issueId, ganttPendingUpdate.newStart, ganttPendingUpdate.newEnd);
+                    if (ok) {
+                        // 更新本地資料
+                        setGanttIssues(prev => prev.map(issue =>
+                            issue.id === ganttPendingUpdate.issueId
+                                ? { ...issue, start_date: ganttPendingUpdate.newStart, due_date: ganttPendingUpdate.newEnd }
+                                : issue
+                        ));
+                    } else {
+                        alert('更新失敗，請檢查 Redmine Token 或網路連線');
+                    }
+                    setGanttPendingUpdate(null);
+                    setUpdating(false);
+                };
+
+                const cancelUpdate = () => setGanttPendingUpdate(null);
+
+                // 週末判斷
+                const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
+
+                // 狀態色彩
+                const getBarColor = (issue) => {
+                    const statusName = issue.status?.name || '';
+                    if (statusName === '實作中') return 'bg-blue-500';
+                    if (statusName === '擱置中') return 'bg-slate-400';
+                    return 'bg-indigo-400';
+                };
+
+                const getBarBorderColor = (issue) => {
+                    const statusName = issue.status?.name || '';
+                    if (statusName === '實作中') return 'border-blue-600';
+                    if (statusName === '擱置中') return 'border-slate-500';
+                    return 'border-indigo-500';
+                };
+
+                if (ganttLoading) {
+                    return (
+                        <div className="flex flex-col items-center justify-center p-20 bg-white rounded-xl border border-slate-200 shadow-sm">
+                            <Loader2 size={32} className="animate-spin text-blue-500 mb-3" />
+                            <p className="text-slate-500 text-sm">正在載入 Redmine 排程資料...</p>
+                        </div>
+                    );
+                }
+
+                if (ganttIssues.length === 0) {
+                    return (
+                        <div className="flex flex-col items-center justify-center p-20 bg-white rounded-xl border border-dashed border-slate-200">
+                            <GanttChart size={48} className="text-slate-200 mb-3" />
+                            <p className="text-slate-400 mb-3">尚無排程資料</p>
+                            <button onClick={fetchGanttData} className="px-6 py-2 bg-blue-600 text-white rounded-lg shadow hover:bg-blue-700 transition-colors text-sm">載入排程</button>
+                        </div>
+                    );
+                }
+
+                return (
+                    <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                        {/* 標題列 */}
+                        <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                            <h3 className="font-semibold text-slate-700 flex items-center gap-2">
+                                <GanttChart size={18} className="text-blue-500" /> 案件排程甘特圖
+                                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-mono">{ganttIssues.length} 筆</span>
+                            </h3>
+                            <div className="flex items-center gap-2">
+                                <button onClick={fetchGanttData} className="text-slate-400 hover:text-blue-600 p-1.5 rounded-full hover:bg-blue-50 transition-colors" title="重新載入">
+                                    <RefreshCw size={14} />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* 甘特圖主體：統一卷軸 */}
+                        <div
+                            ref={ganttRef}
+                            className={`overflow-auto ${panState ? 'cursor-grabbing' : ''}`}
+                            style={{ maxHeight: '75vh' }}
+                            onMouseDown={handlePanStart}
+                        >
+                            <div style={{ minWidth: leftPanelWidth + totalGanttWidth }}>
+                                {/* Sticky 日期標頭列 */}
+                                <div className="flex sticky top-0 z-20">
+                                    <div className="sticky left-0 z-30 shrink-0 bg-slate-50 border-r border-b border-slate-200" style={{ width: leftPanelWidth }}>
+                                        <div className="h-[38px] flex items-center px-3 text-xs font-bold text-slate-500 uppercase gap-3">
+                                            <span className="w-[110px] shrink-0">專案</span>
+                                            <span>主旨</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex border-b border-slate-200 bg-white shrink-0">
+                                        {dateRange.map((d, i) => {
+                                            const isToday = formatDateStr(d) === formatDateStr(today);
+                                            const weekday = ['日','一','二','三','四','五','六'][d.getDay()];
+                                            return (
+                                                <div key={i}
+                                                    className={`text-center text-[10px] font-medium border-r border-slate-100 shrink-0 py-2 ${isToday ? 'bg-blue-50 text-blue-700 font-bold' : isWeekend(d) ? 'bg-red-50/50 text-red-400' : 'text-slate-500'}`}
+                                                    style={{ width: dayWidth }}
+                                                >
+                                                    <div>{d.getMonth()+1}/{d.getDate()}</div>
+                                                    <div className="text-[9px]">({weekday})</div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* Body: 左欄 + 甘特圖 */}
+                                <div className="flex">
+                                    {/* 左欄：sticky left */}
+                                    <div className="sticky left-0 z-10 shrink-0 border-r border-slate-200" style={{ width: leftPanelWidth, backgroundColor: 'rgba(248,250,252,0.97)' }}>
+                                        {groupedData.map((row, idx) => {
+                                            if (row.type === 'header') {
+                                                const dateObj = parseDate(row.date);
+                                                const label = dateObj ? `${dateObj.getMonth()+1}/${dateObj.getDate()}` : row.date;
+                                                return (
+                                                    <div key={'h-' + row.date}
+                                                        onClick={() => toggleCollapseDay(row.date)}
+                                                        className="flex items-center gap-2 px-3 cursor-pointer hover:bg-blue-50 border-b border-slate-200 bg-slate-100/80 select-none transition-colors"
+                                                        style={{ height: groupHeaderHeight }}
+                                                    >
+                                                        <ChevronRight size={12} className={`text-slate-400 transition-transform duration-200 ${!collapsedDays[row.date] ? 'rotate-90' : ''}`} />
+                                                        <span className="text-xs font-bold text-slate-600">開始日 {label}</span>
+                                                        <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-mono">{row.count} 筆</span>
+                                                    </div>
+                                                );
+                                            }
+                                            const issue = row.issue;
+                                            return (
+                                                <div key={issue.id}
+                                                    className="flex items-center border-b border-slate-100 px-3 gap-2 group relative"
+                                                    style={{ height: rowHeight }}
+                                                    onMouseEnter={() => setHoverIssueId(issue.id)}
+                                                    onMouseLeave={() => setHoverIssueId(null)}
+                                                >
+                                                    <span className="w-[110px] shrink-0 text-[10px] text-slate-400 truncate font-medium" title={issue.project?.name}>{issue.project?.name?.replace(/【品檢組】/, '')}</span>
+                                                    <a href={`https://igs.redmine-x.com/issues/${issue.id}`} target="_blank" rel="noopener noreferrer"
+                                                        className="text-xs text-slate-700 truncate hover:text-blue-600 hover:underline cursor-pointer flex-1" title={issue.subject}
+                                                    >{issue.subject}</a>
+                                                    {hoverIssueId === issue.id && (
+                                                        <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-50 bg-slate-800 text-white text-[11px] px-3 py-2 rounded-lg shadow-xl whitespace-nowrap pointer-events-none">
+                                                            <div className="font-bold text-blue-300">#{issue.id}</div>
+                                                            <div className="text-slate-300 mt-0.5">作者: {issue.author?.name || '-'}</div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* 右側甘特圖 */}
+                                    <div className="relative shrink-0" style={{ width: totalGanttWidth, height: totalBodyHeight }}>
+                                        {/* 格線 */}
+                                        {dateRange.map((d, i) => {
+                                            const isToday = formatDateStr(d) === formatDateStr(today);
+                                            return (
+                                                <div key={i}
+                                                    className={`absolute top-0 bottom-0 border-r ${isToday ? 'border-blue-200 bg-blue-50/30' : isWeekend(d) ? 'border-slate-100 bg-red-50/20' : 'border-slate-100'}`}
+                                                    style={{ left: i * dayWidth, width: dayWidth }}
+                                                />
+                                            );
+                                        })}
+                                        {/* 今日標記線 */}
+                                        <div className="absolute top-0 bottom-0 w-0.5 bg-blue-400 z-5 pointer-events-none" style={{ left: 0 }} />
+                                        {/* 分組標頭背景 + 水平分隔線 */}
+                                        {groupedData.map((row, idx) => {
+                                            if (row.type === 'header') {
+                                                return <div key={'gh-' + row.date} className="absolute left-0 right-0 bg-slate-100/60 border-b border-slate-200" style={{ top: rowYOffsets[idx], height: groupHeaderHeight }} />;
+                                            }
+                                            return <div key={'hl-' + row.issue.id} className="absolute left-0 right-0 border-b border-slate-50" style={{ top: rowYOffsets[idx] + rowHeight }} />;
+                                        })}
+                                        {/* Bar 條 */}
+                                        {groupedData.map((row, idx) => {
+                                            if (row.type !== 'issue') return null;
+                                            const issue = row.issue;
+                                            const pos = getBarPosition(issue);
+                                            if (!pos) return null;
+                                            const isPending = ganttPendingUpdate && ganttPendingUpdate.issueId === issue.id;
+                                            const barColor = getBarColor(issue);
+                                            const borderColor = getBarBorderColor(issue);
+                                            return (
+                                                <div key={issue.id} className="absolute group/bar"
+                                                    style={{ left: pos.left + 2, top: rowYOffsets[idx] + 8, width: pos.width, height: rowHeight - 16 }}
+                                                >
+                                                    <div className="absolute left-0 top-[-4px] bottom-[-4px] w-[3px] bg-slate-700 rounded-full z-10 pointer-events-none" />
+                                                    <div
+                                                        className={`h-full rounded-md ${barColor} ${isPending ? 'ring-2 ring-orange-400 ring-offset-1' : ''} border ${borderColor} shadow-sm cursor-grab active:cursor-grabbing relative transition-shadow hover:shadow-md select-none flex items-center justify-center`}
+                                                        onMouseDown={(e) => handleMouseDown(e, issue, 'move')}
+                                                        onMouseEnter={() => setHoverBarIssueId(issue.id)}
+                                                        onMouseLeave={() => setHoverBarIssueId(null)}
+                                                    >
+                                                        {pos.width > 60 && <span className="text-white text-[10px] font-medium truncate px-2 pointer-events-none">{pos.duration}天</span>}
+                                                        <div className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-l-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-left')} />
+                                                        <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-r-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-right')} />
+                                                    </div>
+                                                    {hoverBarIssueId === issue.id && !dragState && (
+                                                        <div className="absolute -top-8 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-[11px] px-3 py-1.5 rounded-lg shadow-xl whitespace-nowrap pointer-events-none">
+                                                            <span className="text-slate-300">分派:</span> <span className="font-bold text-emerald-300">{issue.assigned_to?.name || '未分派'}</span>
+                                                        </div>
+                                                    )}
+                                                    {isPending && (
+                                                        <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-40 flex items-center gap-1 whitespace-nowrap">
+                                                            <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-200 font-mono">{ganttPendingUpdate.newStart} ~ {ganttPendingUpdate.newEnd}</span>
+                                                            <button onClick={(e) => { e.stopPropagation(); confirmUpdate(); }} disabled={updating}
+                                                                className="bg-green-500 hover:bg-green-600 text-white w-6 h-6 rounded flex items-center justify-center disabled:opacity-50 shadow-sm" title="確認更新"
+                                                            >{updating ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}</button>
+                                                            <button onClick={(e) => { e.stopPropagation(); cancelUpdate(); }} disabled={updating}
+                                                                className="bg-white hover:bg-slate-100 text-slate-500 w-6 h-6 rounded flex items-center justify-center disabled:opacity-50 shadow-sm border border-slate-200" title="取消"
+                                                            ><X size={10} /></button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 底部狀態列 + 圖例 */}
+                        <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between text-[10px] text-slate-400">
+                            <div className="flex gap-4">
+                                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-blue-500"></span> 實作中</span>
+                                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-slate-400"></span> 擱置中</span>
+                                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-indigo-400"></span> 其他</span>
+                            </div>
+                            <span>點擊左側日期分組可收折 · 拖曳 bar 條調整排程 · 需點擊確認才生效</span>
+                        </div>
+                    </div>
+                );
+            };
+
             useEffect(() => { if (spreadsheetId && mode === 'public') fetchData(); }, [spreadsheetId]);
 
             return (
@@ -938,6 +1414,11 @@
                                     <button onClick={() => setActiveTab('assignment')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'assignment' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                                         <Users size={16} /> 分配概況
                                     </button>
+                                    {redmineToken && (
+                                        <button onClick={() => setActiveTab('schedule')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'schedule' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+                                            <GanttChart size={16} /> 案件排程
+                                        </button>
+                                    )}
                                     <button onClick={() => setActiveTab('analytics')} className={`flex items-center gap-2 px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'analytics' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
                                         <BarChart3 size={16} /> 分析
                                     </button>
@@ -958,7 +1439,7 @@
                         </div>
                     </div>
 
-                    <div className="flex-1 max-w-7xl mx-auto w-full p-4 md:p-6">
+                    <div className={`flex-1 mx-auto w-full p-4 md:p-6 ${activeTab === 'schedule' ? 'max-w-[1800px]' : 'max-w-7xl'}`}>
 
                         {/* === View 1: 進行中看板 (Dashboard) === */}
                         {activeTab === 'dashboard' && (
@@ -1543,6 +2024,13 @@
 
                                     </div>
                                 ) : (<div className="text-center py-20 text-slate-400 bg-white rounded-xl border border-dashed border-slate-200"><BarChart3 size={48} className="mx-auto mb-3 opacity-20" /><p>請先讀取資料</p></div>)}
+                            </div>
+                        )}
+
+                        {/* === View 5: 案件排程甘特圖 (Schedule) === */}
+                        {activeTab === 'schedule' && (
+                            <div className="space-y-6 animate-in fade-in duration-300">
+                                <GanttChartView />
                             </div>
                         )}
 
