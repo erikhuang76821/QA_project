@@ -985,7 +985,7 @@
             const GanttChartView = () => {
                 const ganttRef = useRef(null);
                 const [dragState, setDragState] = useState(null);
-                const [panState, setPanState] = useState(null);
+                const panRef = useRef(null); // 用 ref 避免 re-render 導致捲動跳回
                 const [hoverIssueId, setHoverIssueId] = useState(null);
                 const [hoverBarIssueId, setHoverBarIssueId] = useState(null);
                 const [updating, setUpdating] = useState(false);
@@ -1129,31 +1129,29 @@
                     };
                 }, [dragState]);
 
-                // --- 空白區域拖曳捲動 ---
+                // --- 空白區域拖曳捲動（用 ref 避免 re-render） ---
                 const handlePanStart = (e) => {
-                    // 僅在空白區域觸發（bar 的 mousedown 已 stopPropagation）
                     if (!ganttRef.current) return;
-                    setPanState({
+                    panRef.current = {
                         startX: e.clientX,
                         startY: e.clientY,
                         scrollLeft: ganttRef.current.scrollLeft,
                         scrollTop: ganttRef.current.scrollTop
-                    });
-                    e.preventDefault();
-                };
-
-                useEffect(() => {
-                    if (!panState) return;
-                    const handlePanMove = (e) => {
-                        if (!ganttRef.current) return;
-                        ganttRef.current.scrollLeft = panState.scrollLeft - (e.clientX - panState.startX);
-                        ganttRef.current.scrollTop = panState.scrollTop - (e.clientY - panState.startY);
                     };
-                    const handlePanEnd = () => setPanState(null);
+                    e.preventDefault();
+                    const handlePanMove = (ev) => {
+                        if (!panRef.current || !ganttRef.current) return;
+                        ganttRef.current.scrollLeft = panRef.current.scrollLeft - (ev.clientX - panRef.current.startX);
+                        ganttRef.current.scrollTop = panRef.current.scrollTop - (ev.clientY - panRef.current.startY);
+                    };
+                    const handlePanEnd = () => {
+                        panRef.current = null;
+                        window.removeEventListener('mousemove', handlePanMove);
+                        window.removeEventListener('mouseup', handlePanEnd);
+                    };
                     window.addEventListener('mousemove', handlePanMove);
                     window.addEventListener('mouseup', handlePanEnd);
-                    return () => { window.removeEventListener('mousemove', handlePanMove); window.removeEventListener('mouseup', handlePanEnd); };
-                }, [panState]);
+                };
 
                 // 確認更新
                 const confirmUpdate = async () => {
@@ -1180,7 +1178,33 @@
                 const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
 
                 // 狀態色彩
+                // 分類色彩：依 custom_fields 中的分類複選欄位判斷
+                const getCategoryType = (issue) => {
+                    const cf = issue.custom_fields;
+                    if (!cf || !Array.isArray(cf)) return null;
+                    for (const field of cf) {
+                        const vals = Array.isArray(field.value) ? field.value : [field.value];
+                        for (const v of vals) {
+                            if (v === '519' || (v && v.includes('【外包】主要測試'))) return 'outsource-main';
+                            if (v === '520' || (v && v.includes('【外包】局部協測'))) return 'outsource-partial';
+                        }
+                    }
+                    return null;
+                };
+
+                // 判斷 issue 是否有 bar 在當日
+                const isBarOnToday = (issue) => {
+                    const s = parseDate(issue.start_date);
+                    const e = parseDate(issue.due_date) || s;
+                    if (!s) return false;
+                    return today >= s && today <= e;
+                };
+
                 const getBarColor = (issue) => {
+                    const catType = getCategoryType(issue);
+                    const onToday = isBarOnToday(issue);
+                    if (catType === 'outsource-main') return onToday ? 'bg-emerald-500' : 'bg-emerald-300/70';
+                    if (catType === 'outsource-partial') return onToday ? 'bg-purple-400' : 'bg-purple-300/60';
                     const statusName = issue.status?.name || '';
                     if (statusName === '實作中') return 'bg-blue-500';
                     if (statusName === '擱置中') return 'bg-slate-400';
@@ -1188,6 +1212,9 @@
                 };
 
                 const getBarBorderColor = (issue) => {
+                    const catType = getCategoryType(issue);
+                    if (catType === 'outsource-main') return 'border-emerald-600';
+                    if (catType === 'outsource-partial') return 'border-purple-500';
                     const statusName = issue.status?.name || '';
                     if (statusName === '實作中') return 'border-blue-600';
                     if (statusName === '擱置中') return 'border-slate-500';
@@ -1231,7 +1258,7 @@
                         {/* 甘特圖主體：統一卷軸 */}
                         <div
                             ref={ganttRef}
-                            className={`overflow-auto ${panState ? 'cursor-grabbing' : ''}`}
+                            className="overflow-auto"
                             style={{ maxHeight: '75vh' }}
                             onMouseDown={handlePanStart}
                         >
@@ -1375,10 +1402,12 @@
 
                         {/* 底部狀態列 + 圖例 */}
                         <div className="px-4 py-2 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between text-[10px] text-slate-400">
-                            <div className="flex gap-4">
+                            <div className="flex gap-4 flex-wrap">
                                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-blue-500"></span> 實作中</span>
                                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-slate-400"></span> 擱置中</span>
                                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-indigo-400"></span> 其他</span>
+                                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-emerald-500"></span> 外包主要測試</span>
+                                <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-purple-400"></span> 外包局部協測</span>
                             </div>
                             <span>點擊左側日期分組可收折 · 拖曳 bar 條調整排程 · 需點擊確認才生效</span>
                         </div>
