@@ -994,7 +994,7 @@
                 const today = useMemo(() => {
                     const d = new Date(); d.setHours(0,0,0,0); return d;
                 }, []);
-                const ganttDays = 14;
+                const ganttDays = 30; // 今日往後 1 個月
                 const dayWidth = 80;
                 const rowHeight = 44;
                 const groupHeaderHeight = 30; // 分組標頭高度
@@ -1074,60 +1074,78 @@
                     };
                 };
 
-                // 滑鼠互動處理
+                // 滑鼠互動處理（拖曳中不觸發 re-render）
+                const dragPendingRef = useRef(null);
+
                 const handleMouseDown = (e, issue, mode) => {
                     e.preventDefault();
                     e.stopPropagation();
                     const pos = getBarPosition(issue);
                     if (!pos) return;
-                    setDragState({
-                        issueId: issue.id,
-                        mode,
-                        startX: e.clientX,
-                        origStartDate: pos.startDate,
-                        origEndDate: pos.endDate
-                    });
-                };
 
-                useEffect(() => {
-                    if (!dragState) return;
-                    const handleMouseMove = (e) => {
-                        const dx = e.clientX - dragState.startX;
+                    const barEl = e.currentTarget.closest('[data-issue-id]');
+                    const origWidth = pos.width;
+
+                    // 直接用 ref + DOM 操作，不 setState 避免 re-render
+                    const startX = e.clientX;
+                    const origStartDate = pos.startDate;
+                    const origEndDate = pos.endDate;
+
+                    const handleMouseMove = (ev) => {
+                        const dx = ev.clientX - startX;
                         const daysDelta = Math.round(dx / dayWidth);
-                        if (daysDelta === 0 && !ganttPendingUpdate) return;
 
-                        let newStart = new Date(dragState.origStartDate);
-                        let newEnd = new Date(dragState.origEndDate);
+                        let newStart = new Date(origStartDate);
+                        let newEnd = new Date(origEndDate);
 
-                        if (dragState.mode === 'move') {
+                        if (mode === 'move') {
                             newStart.setDate(newStart.getDate() + daysDelta);
                             newEnd.setDate(newEnd.getDate() + daysDelta);
-                        } else if (dragState.mode === 'resize-left') {
+                            if (barEl) barEl.style.transform = `translateX(${daysDelta * dayWidth}px)`;
+                        } else if (mode === 'resize-left') {
                             newStart.setDate(newStart.getDate() + daysDelta);
                             if (newStart > newEnd) newStart = new Date(newEnd);
-                        } else if (dragState.mode === 'resize-right') {
+                            const actualDelta = Math.floor((newStart - origStartDate) / (1000*60*60*24));
+                            if (barEl) {
+                                barEl.style.transform = `translateX(${actualDelta * dayWidth}px)`;
+                                barEl.style.width = `${origWidth - actualDelta * dayWidth}px`;
+                            }
+                        } else if (mode === 'resize-right') {
                             newEnd.setDate(newEnd.getDate() + daysDelta);
                             if (newEnd < newStart) newEnd = new Date(newStart);
+                            const newDuration = Math.floor((newEnd - newStart) / (1000*60*60*24)) + 1;
+                            if (barEl) barEl.style.width = `${Math.max(newDuration, 1) * dayWidth - 4}px`;
                         }
 
-                        setGanttPendingUpdate({
-                            issueId: dragState.issueId,
+                        dragPendingRef.current = {
+                            issueId: issue.id,
                             newStart: formatDateStr(newStart),
                             newEnd: formatDateStr(newEnd),
-                            originalStart: formatDateStr(dragState.origStartDate),
-                            originalEnd: formatDateStr(dragState.origEndDate)
-                        });
+                            originalStart: formatDateStr(origStartDate),
+                            originalEnd: formatDateStr(origEndDate)
+                        };
                     };
+
                     const handleMouseUp = () => {
+                        // 清除 DOM 直接操作的樣式
+                        if (barEl) {
+                            barEl.style.transform = '';
+                            barEl.style.width = '';
+                        }
+                        // 放開才 setState 觸發 re-render
+                        if (dragPendingRef.current) {
+                            setGanttPendingUpdate(dragPendingRef.current);
+                        }
+                        dragPendingRef.current = null;
                         setDragState(null);
-                    };
-                    window.addEventListener('mousemove', handleMouseMove);
-                    window.addEventListener('mouseup', handleMouseUp);
-                    return () => {
                         window.removeEventListener('mousemove', handleMouseMove);
                         window.removeEventListener('mouseup', handleMouseUp);
                     };
-                }, [dragState]);
+
+                    setDragState({ issueId: issue.id, mode }); // 僅標記正在拖曳（隱藏 tooltip 等）
+                    window.addEventListener('mousemove', handleMouseMove);
+                    window.addEventListener('mouseup', handleMouseUp);
+                };
 
                 // --- 空白區域拖曳捲動（用 ref 避免 re-render） ---
                 const handlePanStart = (e) => {
@@ -1261,6 +1279,7 @@
                             className="overflow-auto"
                             style={{ maxHeight: '75vh' }}
                             onMouseDown={handlePanStart}
+                            onContextMenu={(e) => e.preventDefault()}
                         >
                             <div style={{ minWidth: leftPanelWidth + totalGanttWidth }}>
                                 {/* Sticky 日期標頭列 */}
@@ -1291,7 +1310,7 @@
                                 {/* Body: 左欄 + 甘特圖 */}
                                 <div className="flex">
                                     {/* 左欄：sticky left */}
-                                    <div className="sticky left-0 z-10 shrink-0 border-r border-slate-200" style={{ width: leftPanelWidth, backgroundColor: 'rgba(248,250,252,0.97)' }}>
+                                    <div className="sticky left-0 z-20 shrink-0 border-r border-slate-200 bg-[#f8fafc]" style={{ width: leftPanelWidth }}>
                                         {groupedData.map((row, idx) => {
                                             if (row.type === 'header') {
                                                 const dateObj = parseDate(row.date);
@@ -1332,7 +1351,7 @@
                                     </div>
 
                                     {/* 右側甘特圖 */}
-                                    <div className="relative shrink-0" style={{ width: totalGanttWidth, height: totalBodyHeight }}>
+                                    <div className="relative shrink-0 overflow-hidden" style={{ width: totalGanttWidth, height: totalBodyHeight }}>
                                         {/* 格線 */}
                                         {dateRange.map((d, i) => {
                                             const isToday = formatDateStr(d) === formatDateStr(today);
@@ -1343,8 +1362,8 @@
                                                 />
                                             );
                                         })}
-                                        {/* 今日標記線 */}
-                                        <div className="absolute top-0 bottom-0 w-0.5 bg-blue-400 z-5 pointer-events-none" style={{ left: 0 }} />
+                                        {/* 今日標記線（z-[1] 避免蓋住左側面板） */}
+                                        <div className="absolute top-0 bottom-0 w-0.5 bg-blue-400 z-[1] pointer-events-none" style={{ left: 0 }} />
                                         {/* 分組標頭背景 + 水平分隔線 */}
                                         {groupedData.map((row, idx) => {
                                             if (row.type === 'header') {
@@ -1362,7 +1381,7 @@
                                             const barColor = getBarColor(issue);
                                             const borderColor = getBarBorderColor(issue);
                                             return (
-                                                <div key={issue.id} className="absolute group/bar"
+                                                <div key={issue.id} className="absolute group/bar" data-issue-id={issue.id}
                                                     style={{ left: pos.left + 2, top: rowYOffsets[idx] + 8, width: pos.width, height: rowHeight - 16 }}
                                                 >
                                                     <div className="absolute left-0 top-[-4px] bottom-[-4px] w-[3px] bg-slate-700 rounded-full z-10 pointer-events-none" />
@@ -1381,7 +1400,7 @@
                                                             <span className="text-slate-300">分派:</span> <span className="font-bold text-emerald-300">{issue.assigned_to?.name || '未分派'}</span>
                                                         </div>
                                                     )}
-                                                    {isPending && (
+                                                    {isPending && !dragState && (
                                                         <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-40 flex items-center gap-1 whitespace-nowrap">
                                                             <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-200 font-mono">{ganttPendingUpdate.newStart} ~ {ganttPendingUpdate.newEnd}</span>
                                                             <button onClick={(e) => { e.stopPropagation(); confirmUpdate(); }} disabled={updating}
