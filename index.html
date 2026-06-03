@@ -18,7 +18,8 @@
         "imports": {
             "react": "https://esm.sh/react@18.2.0",
             "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
-            "lucide-react": "https://esm.sh/lucide-react@0.292.0"
+            "lucide-react": "https://esm.sh/lucide-react@0.292.0",
+            "qa-utils": "./src/utils.js"
         }
     }
     </script>
@@ -61,6 +62,48 @@
             Users, ChevronDown, ChevronUp, Briefcase, Anchor, Hourglass,
             GanttChart, GripHorizontal
         } from 'lucide-react';
+
+        // 業務邏輯純函式：與 Vitest 共用同一份 src/utils.js（單一真相來源，避免雙份定義不同步）
+        import {
+            COL,
+            formatSimpleDate,
+            getMonthStr,
+            getDaysDiff,
+            isLate,
+            isFeedbackCountable,
+            getMergedTypeName as getMergedTypeNameRaw,
+            normalize,
+            diffRows,
+            PROXY_STRATEGIES,
+            isHtmlErrorPage,
+            unwrapProxyResponse,
+        } from 'qa-utils';
+
+        // 甘特圖編輯開關。
+        // false = 唯讀看板（只顯示）。因為純前端透過公開 CORS proxy 無法可靠寫入 Redmine（PUT 不被轉發），
+        //         拖曳調整排程的「確認更新」會失敗，且有「假成功」風險，故預設關閉。
+        // true  = 恢復拖曳調整 + 確認寫入。僅在你部署了「可轉發 PUT 並以 header 帶 token」的自控 proxy
+        //         （例如 Cloudflare Worker，並同步更新 updateIssueDates 的目標）後再開啟。
+        // 相關編輯邏輯（handleMouseDown / updateIssueDates / confirmUpdate / ganttPendingUpdate）皆保留，
+        // 僅由此開關決定是否啟用，方便日後一鍵恢復。
+        const GANTT_EDITABLE = false;
+
+        // 共用：依序嘗試各 CORS proxy，回傳目標 API 的 parsed JSON；全部失敗回 null。
+        // 取代原本散落在 fetchRedmineData / fetchRedmineNote / fetchGanttData 三處的重複迴圈。
+        async function fetchJsonViaProxy(targetUrl, options) {
+            for (const strategy of PROXY_STRATEGIES) {
+                try {
+                    const response = await fetch(strategy.getUrl(targetUrl), options);
+                    if (!response.ok) continue;
+                    const text = await response.text();
+                    // HTML 錯誤頁直接跳過（AllOrigins 會把內容包在 contents，交給 unwrap 判斷）
+                    if (isHtmlErrorPage(text) && !strategy.wrapped) continue;
+                    const data = unwrapProxyResponse(strategy, text);
+                    if (data) return data;
+                } catch (e) { /* 試下一個 proxy */ }
+            }
+            return null;
+        }
 
         const App = () => {
             // --- 1. 狀態管理 ---
@@ -169,74 +212,11 @@
                 setCaseFilter('all');
             }, [selectedMonth, data]);
 
-            // 日期處理
-            const formatSimpleDate = (dateStr) => {
-                if (!dateStr) return '';
-                const str = String(dateStr);
-                if (str.startsWith('Date(')) {
-                    const parts = str.match(/Date\((\d+),(\d+),(\d+)\)/);
-                    if (parts) return `${parts[1]}/${parseInt(parts[2]) + 1}/${parts[3]}`;
-                }
-                const d = new Date(str);
-                if (!isNaN(d.getTime())) return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-                return str;
-            };
+            // 日期處理 / 判斷邏輯：已抽到 src/utils.js（formatSimpleDate / getMonthStr /
+            // getDaysDiff / isLate / isFeedbackCountable / normalize），此處直接使用 import 的版本。
 
-            const getMonthStr = (dateStr) => {
-                if (!dateStr) return '未知月份';
-                const str = String(dateStr);
-                let d;
-                if (str.startsWith('Date(')) {
-                    const parts = str.match(/Date\((\d+),(\d+),(\d+)\)/);
-                    if (parts) d = new Date(parts[1], parts[2], parts[3]);
-                } else {
-                    d = new Date(str);
-                }
-                return (d && !isNaN(d.getTime())) ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` : '未知月份';
-            };
-
-            // 計算累計天數
-            const getDaysDiff = (dateStr) => {
-                const now = new Date();
-                let date = null;
-                const dStr = String(dateStr);
-                if (dStr.startsWith('Date(')) {
-                    const parts = dStr.match(/Date\((\d+),(\d+),(\d+)\)/);
-                    if (parts) {
-                        date = new Date(parseInt(parts[1]), parseInt(parts[2]), parseInt(parts[3]));
-                    }
-                } else {
-                    date = new Date(dStr);
-                }
-                if (date && !isNaN(date.getTime())) {
-                    const diffTime = Math.abs(now - date);
-                    return Math.floor(diffTime / (1000 * 60 * 60 * 24));
-                }
-                return 0;
-            };
-
-            // 判斷邏輯
-            const isLate = (row) => {
-                const val = row[9]; // K欄
-                if (!val) return false;
-                const str = String(val).trim();
-                const safeWords = ['無', '沒有', '空白', ''];
-                return !safeWords.includes(str);
-            };
-
-            const isFeedbackCountable = (val) => {
-                if (!val) return false;
-                const str = String(val).trim();
-                const excludeList = ['空白', '無', '外包協測', '外包主測', '外包測試'];
-                return !excludeList.includes(str);
-            };
-
-            // *分析: 取得合併後的專案名稱
-            const getMergedTypeName = (originalName) => {
-                if (!originalName) return '未分類';
-                const rule = mergeRules.find(r => r.sources.includes(originalName));
-                return rule ? rule.targetName : originalName;
-            };
+            // *分析: 取得合併後的專案名稱（薄包裝：把目前的 mergeRules 綁進純函式）
+            const getMergedTypeName = (originalName) => getMergedTypeNameRaw(originalName, mergeRules);
 
             // *分析: 點擊人名邏輯 (開/關)
             const handleWindowClick = (name) => {
@@ -443,43 +423,26 @@
 
             const checkAndNotify = useCallback((newData) => {
                 if (!prevDataRef.current) { prevDataRef.current = newData; return; }
-                const oldData = prevDataRef.current;
 
-                // 定義正規化函式：將 '空白', '無', '' 視為相同
-                const normalize = (val) => {
-                    const str = String(val ?? '').trim();
-                    return ['空白', '無', ''].includes(str) ? '' : str;
-                };
+                // 修正 B1：以單號為鍵比對（diffRows），插入/刪除/排序列不再造成誤報
+                const { added, changed } = diffRows(prevDataRef.current, newData);
 
-                if (newData.length > oldData.length) {
-                    const newRows = newData.slice(oldData.length);
-                    newRows.forEach(row => {
-                        if (row[0]) {
-                            const msg = `🆕 <b>新增任務</b>\n任務內容：${row[4] || '(無名稱)'} , 品檢: ${row[6] || ''}`;
-                            sendTelegramMessage(msg);
-                        }
-                    });
-                }
+                added.forEach(newRow => {
+                    if (!newRow[COL.TYPE]) return;
+                    const msg = `🆕 <b>新增任務</b>\n任務內容：${newRow[COL.NAME] || '(無名稱)'} , 品檢: ${newRow[COL.MORNING] || ''}`;
+                    sendTelegramMessage(msg);
+                });
 
-                const compareLength = Math.min(oldData.length, newData.length);
-                for (let i = 0; i < compareLength; i++) {
-                    const oldRow = oldData[i]; const newRow = newData[i];
-
-                    const oldJ = normalize(oldRow[8]); const newJ = normalize(newRow[8]);
-                    const oldK = normalize(oldRow[9]); const newK = normalize(newRow[9]);
-
+                changed.forEach(({ oldRow, newRow, feedbackChanged, lateChanged }) => {
                     let changeDesc = '';
-                    // 只有在正規化後的值不同時才發送通知 (修正1: 移除欄位代號)
-                    if (oldJ !== newJ) changeDesc += `\n狀況反饋: "${oldRow[8] || '無'}" ➔ "${newRow[8] || '無'}"`;
-                    if (oldK !== newK) changeDesc += `\n遲送狀態: "${oldRow[9] || '無'}" ➔ "${newRow[9] || '無'}"`;
+                    if (feedbackChanged) changeDesc += `\n狀況反饋: "${oldRow[COL.FEEDBACK] || '無'}" ➔ "${newRow[COL.FEEDBACK] || '無'}"`;
+                    if (lateChanged) changeDesc += `\n遲送狀態: "${oldRow[COL.LATE] || '無'}" ➔ "${newRow[COL.LATE] || '無'}"`;
+                    const now = new Date();
+                    const timeStr = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+                    const msg = `⚠️ <b>測試狀況異動</b> : ${timeStr}\n任務：${newRow[COL.NAME] || '(無名稱)'}${changeDesc}`;
+                    sendTelegramMessage(msg);
+                });
 
-                    if (changeDesc) {
-                        const now = new Date();
-                        const timeStr = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-                        const msg = `⚠️ <b>測試狀況異動</b> : ${timeStr}\n任務：${newRow[4] || '(無名稱)'}${changeDesc}`;
-                        sendTelegramMessage(msg);
-                    }
-                }
                 prevDataRef.current = newData;
             }, [sendTelegramMessage]);
 
@@ -503,96 +466,35 @@
             const fetchRedmineData = useCallback(async (ticketIds) => {
                 if (!redmineToken || ticketIds.length === 0) return;
                 setLoadingRedmine(true);
-                const newRedmineData = { ...redmineData };
 
-                const validIds = ticketIds.filter(id => id);
-                const uniqueIds = [...new Set(validIds)];
+                const uniqueIds = [...new Set(ticketIds.filter(id => id))];
+                const collected = {};
 
-                // 定義 Proxy 策略 (參考成功範例)
-                // 注意：將 API Key 放在 URL 參數中以便通過 Proxy 傳遞
-                const getStrategies = (targetUrl) => [
-                    {
-                        name: "CodeTabs",
-                        getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
-                    },
-                    {
-                        name: "AllOrigins (JSON)",
-                        getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}`
-                    },
-                    {
-                        name: "CorsProxy.io",
-                        getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`
-                    }
-                ];
-
-                // 單一議題讀取函式
+                // 單一議題讀取（共用 fetchJsonViaProxy，proxy 迴圈不再各自複製）
                 const fetchIssue = async (rawId) => {
                     const id = String(rawId).trim();
                     if (!id) return;
-
-                    // 1. 建構目標 URL (含 Key)
                     const targetUrl = `https://igs.redmine-x.com/issues/${id}.json?key=${redmineToken}`;
-                    const strategies = getStrategies(targetUrl);
-
-                    for (const strategy of strategies) {
-                        try {
-                            const finalUrl = strategy.getUrl(targetUrl);
-                            const response = await fetch(finalUrl);
-
-                            if (!response.ok) continue; // 嘗試下一個策略
-
-                            const text = await response.text();
-
-                            // 檢查是否為 HTML 錯誤頁 (Redmine 常見行為)
-                            if (text.trim().startsWith("<") && text.includes("html")) {
-                                if (strategy.name !== "AllOrigins (JSON)") {
-                                    console.warn(`Redmine fetch warning for #${id}: Received HTML via ${strategy.name}`);
-                                    continue;
-                                }
-                            }
-
-                            let json;
-                            try {
-                                json = JSON.parse(text);
-                            } catch (e) { continue; }
-
-                            // 處理 AllOrigins 的 Wrapper
-                            let finalData = json;
-                            if (strategy.name === "AllOrigins (JSON)") {
-                                if (json.contents) {
-                                    try {
-                                        finalData = JSON.parse(json.contents);
-                                    } catch (e) { continue; }
-                                } else { continue; }
-                            }
-
-                            if (finalData && finalData.issue) {
-                                newRedmineData[id] = {
-                                    spent: parseFloat(finalData.issue.spent_hours) || 0,
-                                    estimated: parseFloat(finalData.issue.estimated_hours) || 0,
-                                    dueDate: finalData.issue.due_date || null,
-                                    status: 'ok'
-                                };
-                                return; // 成功，結束此 ID 的處理
-                            }
-                        } catch (e) {
-                            // console.warn(`Strategy ${strategy.name} failed for #${id}`, e);
-                        }
-                    }
-
-                    // 若所有策略都失敗
-                    if (!newRedmineData[id]) {
-                        // 標記失敗，避免重複請求
-                        newRedmineData[id] = null;
+                    const data = await fetchJsonViaProxy(targetUrl);
+                    if (data && data.issue) {
+                        collected[id] = {
+                            spent: parseFloat(data.issue.spent_hours) || 0,
+                            estimated: parseFloat(data.issue.estimated_hours) || 0,
+                            dueDate: data.issue.due_date || null,
+                            status: 'ok'
+                        };
+                    } else {
+                        collected[id] = null; // 標記失敗，避免重複請求
                     }
                 };
 
-                // 批次執行 (為了避免瞬間過多請求，可以考慮分批，但這裡先用 Promise.all)
                 await Promise.all(uniqueIds.map(id => fetchIssue(id)));
 
-                setRedmineData(newRedmineData);
+                // 修正 B2：functional update 合併本輪結果，不再讀取/依賴 redmineData，
+                // 避免 fetchRedmineData → fetchData → 自動刷新計時器連鎖重建。
+                setRedmineData(prev => ({ ...prev, ...collected }));
                 setLoadingRedmine(false);
-            }, [redmineToken, redmineData]);
+            }, [redmineToken]);
 
             // --- 4.5 Redmine 筆記讀取 (hover tooltip 用) ---
             const fetchRedmineNote = useCallback(async (issueId) => {
@@ -602,36 +504,13 @@
                 setRedmineNotes(prev => ({ ...prev, [cleanId]: null }));
 
                 const targetUrl = `https://igs.redmine-x.com/issues/${cleanId}.json?key=${redmineToken}&include=journals`;
-                const strategies = [
-                    { name: "CodeTabs", getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
-                    { name: "AllOrigins (JSON)", getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
-                    { name: "CorsProxy.io", getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` }
-                ];
-
-                for (const strategy of strategies) {
-                    try {
-                        const finalUrl = strategy.getUrl(targetUrl);
-                        const response = await fetch(finalUrl);
-                        if (!response.ok) continue;
-                        const text = await response.text();
-                        if (text.trim().startsWith("<") && text.includes("html") && strategy.name !== "AllOrigins (JSON)") continue;
-
-                        let json;
-                        try { json = JSON.parse(text); } catch (e) { continue; }
-
-                        let finalData = json;
-                        if (strategy.name === "AllOrigins (JSON)") {
-                            if (json.contents) { try { finalData = JSON.parse(json.contents); } catch (e) { continue; } } else { continue; }
-                        }
-
-                        if (finalData && finalData.issue && finalData.issue.journals) {
-                            // 取最後一筆有 notes 的 journal
-                            const notesJournals = finalData.issue.journals.filter(j => j.notes && j.notes.trim());
-                            const lastNote = notesJournals.length > 0 ? notesJournals[notesJournals.length - 1].notes : '( 無筆記 )';
-                            setRedmineNotes(prev => ({ ...prev, [cleanId]: lastNote }));
-                            return;
-                        }
-                    } catch (e) { /* 嘗試下一個策略 */ }
+                const data = await fetchJsonViaProxy(targetUrl);
+                if (data && data.issue && data.issue.journals) {
+                    // 取最後一筆有 notes 的 journal
+                    const notesJournals = data.issue.journals.filter(j => j.notes && j.notes.trim());
+                    const lastNote = notesJournals.length > 0 ? notesJournals[notesJournals.length - 1].notes : '( 無筆記 )';
+                    setRedmineNotes(prev => ({ ...prev, [cleanId]: lastNote }));
+                    return;
                 }
                 setRedmineNotes(prev => ({ ...prev, [cleanId]: '( 讀取失敗 )' }));
             }, [redmineToken, redmineNotes]);
@@ -922,29 +801,9 @@
                 if (!redmineToken) return;
                 setGanttLoading(true);
                 const targetUrl = `https://igs.redmine-x.com/projects/old_ts_test/issues.json?query_id=1736&key=${redmineToken}&limit=100&sort=start_date:asc`;
-                const strategies = [
-                    { name: "CodeTabs", getUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}` },
-                    { name: "AllOrigins (JSON)", getUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_t=${Date.now()}` },
-                    { name: "CorsProxy.io", getUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}` }
-                ];
-                for (const strategy of strategies) {
-                    try {
-                        const finalUrl = strategy.getUrl(targetUrl);
-                        const response = await fetch(finalUrl);
-                        if (!response.ok) continue;
-                        const text = await response.text();
-                        if (text.trim().startsWith("<") && text.includes("html") && strategy.name !== "AllOrigins (JSON)") continue;
-                        let json; try { json = JSON.parse(text); } catch (e) { continue; }
-                        let finalData = json;
-                        if (strategy.name === "AllOrigins (JSON)") {
-                            if (json.contents) { try { finalData = JSON.parse(json.contents); } catch (e) { continue; } } else { continue; }
-                        }
-                        if (finalData && finalData.issues) {
-                            setGanttIssues(finalData.issues);
-                            setGanttLoading(false);
-                            return;
-                        }
-                    } catch (e) { /* 嘗試下一個策略 */ }
+                const data = await fetchJsonViaProxy(targetUrl);
+                if (data && data.issues) {
+                    setGanttIssues(data.issues);
                 }
                 setGanttLoading(false);
             }, [redmineToken]);
@@ -1002,6 +861,17 @@
                         }
                     });
                 });
+
+                // 修正「拖曳放開錨點跳回」：放開後 setGanttPendingUpdate 會重算 bar 的 left（已含位移），
+                // 但拖曳期間用 DOM 直接加上的 inline transform 是 React 不管的殘留樣式。
+                // 這裡在 re-render（新 left 已套用）之後、瀏覽器 paint 之前用 useLayoutEffect 一次清除，
+                // 避免「先清 transform 跳回原位 → 再被 React 移到新位置」的閃爍。
+                // （width 由 React 透過 style prop 控管，re-render 會自行重設，故此處不動 width。）
+                useLayoutEffect(() => {
+                    const el = ganttRef.current;
+                    if (!el) return;
+                    el.querySelectorAll('[data-issue-id]').forEach(b => { b.style.transform = ''; });
+                }, [ganttPendingUpdate]);
 
                 const today = useMemo(() => {
                     const d = new Date(); d.setHours(0,0,0,0); return d;
@@ -1140,14 +1010,16 @@
                     };
 
                     const handleMouseUp = () => {
-                        // 清除 DOM 直接操作的樣式
-                        if (barEl) {
-                            barEl.style.transform = '';
-                            barEl.style.width = '';
-                        }
-                        // 放開才 setState 觸發 re-render
+                        // 放開才 setState 觸發 re-render。
+                        // 注意：不要在此同步清除 inline transform，否則 bar 會先跳回原位、
+                        // 再被 React 移到新位置 → 造成「錨點跳回」閃爍。
+                        // 殘留的 transform 改由上方 useLayoutEffect 於 re-render 後、paint 前清除。
                         if (dragPendingRef.current) {
                             setGanttPendingUpdate(dragPendingRef.current);
+                        } else if (barEl) {
+                            // 純點擊未拖曳：不會產生 pending、不觸發 re-render，自行還原殘留樣式
+                            barEl.style.transform = '';
+                            barEl.style.width = '';
                         }
                         dragPendingRef.current = null;
                         dragActiveRef.current = false;
@@ -1401,21 +1273,21 @@
                                                 >
                                                     <div className="absolute left-0 top-[-4px] bottom-[-4px] w-[3px] bg-slate-700 rounded-full z-10 pointer-events-none" />
                                                     <div
-                                                        className={`h-full rounded-md ${barColor} ${isPending ? 'ring-2 ring-orange-400 ring-offset-1' : ''} border ${borderColor} shadow-sm cursor-grab active:cursor-grabbing relative transition-shadow hover:shadow-md select-none flex items-center justify-center`}
-                                                        onMouseDown={(e) => handleMouseDown(e, issue, 'move')}
+                                                        className={`h-full rounded-md ${barColor} ${isPending ? 'ring-2 ring-orange-400 ring-offset-1' : ''} border ${borderColor} shadow-sm ${GANTT_EDITABLE ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} relative transition-shadow hover:shadow-md select-none flex items-center justify-center`}
+                                                        onMouseDown={GANTT_EDITABLE ? (e) => handleMouseDown(e, issue, 'move') : undefined}
                                                         onMouseEnter={() => setHoverBarIssueId(issue.id)}
                                                         onMouseLeave={() => setHoverBarIssueId(null)}
                                                     >
                                                         {pos.width > 60 && <span className="text-white text-[10px] font-medium truncate px-2 pointer-events-none">{pos.duration}天</span>}
-                                                        <div className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-l-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-left')} />
-                                                        <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-r-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-right')} />
+                                                        {GANTT_EDITABLE && <div className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-l-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-left')} />}
+                                                        {GANTT_EDITABLE && <div className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-white/30 rounded-r-md" onMouseDown={(e) => handleMouseDown(e, issue, 'resize-right')} />}
                                                     </div>
                                                     {hoverBarIssueId === issue.id && !dragActiveRef.current && (
                                                         <div className="absolute -top-8 left-1/2 -translate-x-1/2 z-50 bg-slate-800 text-white text-[11px] px-3 py-1.5 rounded-lg shadow-xl whitespace-nowrap pointer-events-none">
                                                             <span className="text-slate-300">分派:</span> <span className="font-bold text-emerald-300">{issue.assigned_to?.name || '未分派'}</span>
                                                         </div>
                                                     )}
-                                                    {isPending && !dragActiveRef.current && (
+                                                    {GANTT_EDITABLE && isPending && !dragActiveRef.current && (
                                                         <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-40 flex items-center gap-1 whitespace-nowrap">
                                                             <span className="text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-200 font-mono">{ganttPendingUpdate.newStart} ~ {ganttPendingUpdate.newEnd}</span>
                                                             <button onClick={(e) => { e.stopPropagation(); confirmUpdate(); }} disabled={updating}
@@ -1443,7 +1315,7 @@
                                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-emerald-500"></span> 外包主要測試</span>
                                 <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-purple-400"></span> 外包局部協測</span>
                             </div>
-                            <span>點擊左側日期分組可收折 · 拖曳 bar 條調整排程 · 需點擊確認才生效</span>
+                            <span>{GANTT_EDITABLE ? '點擊左側日期分組可收折 · 拖曳 bar 條調整排程 · 需點擊確認才生效' : '點擊左側日期分組可收折 · 排程資料唯讀，如需調整請至 Redmine'}</span>
                         </div>
                     </div>
                 );
@@ -1625,7 +1497,7 @@
 
                                                                 return (
                                                                     <tr
-                                                                        key={i}
+                                                                        key={ticketId || i}
                                                                         id={`ticket-${ticketId}`}
                                                                         className={`group transition-all duration-500 ${late ? 'bg-red-50/10' : ''} ${isHighlighted ? 'bg-purple-100 shadow-inner' : 'hover:bg-blue-50/30'}`}
                                                                     >
@@ -1713,11 +1585,11 @@
                                             <div className="space-y-3">
                                                 {assignmentStats.morning.length === 0 ? <p className="text-slate-400 text-sm">無早班資料</p> :
                                                     assignmentStats.morning.map((person, idx) => {
-                                                        const isExpanded = expandedPersons[`morning-${idx}`];
+                                                        const isExpanded = expandedPersons[`morning-${person.name}`];
                                                         return (
-                                                            <div key={idx} className="border border-slate-100 rounded-lg overflow-hidden">
+                                                            <div key={person.name} className="border border-slate-100 rounded-lg overflow-hidden">
                                                                 <div
-                                                                    onClick={() => togglePersonExpand(`morning-${idx}`)}
+                                                                    onClick={() => togglePersonExpand(`morning-${person.name}`)}
                                                                     className={`p-3 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'bg-slate-50 border-b border-slate-100' : ''}`}
                                                                 >
                                                                     <div className="flex items-center gap-3">
@@ -1749,7 +1621,7 @@
                                                                                     const tId = String(t[1]).trim();
                                                                                     const isTicketExpanded = expandedTickets[tId];
                                                                                     return (
-                                                                                        <React.Fragment key={ti}>
+                                                                                        <React.Fragment key={tId}>
                                                                                             <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-blue-50/50 transition-colors ${isTicketExpanded ? 'bg-blue-50/30' : ''}`}>
                                                                                                 <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
                                                                                                 <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
@@ -1786,11 +1658,11 @@
                                             <div className="space-y-3">
                                                 {assignmentStats.middle.length === 0 ? <p className="text-slate-400 text-sm">無中班資料</p> :
                                                     assignmentStats.middle.map((person, idx) => {
-                                                        const isExpanded = expandedPersons[`middle-${idx}`];
+                                                        const isExpanded = expandedPersons[`middle-${person.name}`];
                                                         return (
-                                                            <div key={idx} className="border border-slate-100 rounded-lg overflow-hidden">
+                                                            <div key={person.name} className="border border-slate-100 rounded-lg overflow-hidden">
                                                                 <div
-                                                                    onClick={() => togglePersonExpand(`middle-${idx}`)}
+                                                                    onClick={() => togglePersonExpand(`middle-${person.name}`)}
                                                                     className={`p-3 flex items-center justify-between cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'bg-slate-50 border-b border-slate-100' : ''}`}
                                                                 >
                                                                     <div className="flex items-center gap-3">
@@ -1822,7 +1694,7 @@
                                                                                     const tId = String(t[1]).trim();
                                                                                     const isTicketExpanded = expandedTickets[tId];
                                                                                     return (
-                                                                                        <React.Fragment key={ti}>
+                                                                                        <React.Fragment key={tId}>
                                                                                             <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-indigo-50/50 transition-colors ${isTicketExpanded ? 'bg-indigo-50/30' : ''}`}>
                                                                                                 <td className="py-2 pr-2 align-top break-words">{t[4]}</td>
                                                                                                 <td className="py-2 whitespace-nowrap align-top text-slate-500">{formatSimpleDate(t[2])}</td>
@@ -1876,7 +1748,7 @@
                                                                     const tId = String(t[1]).trim();
                                                                     const isTicketExpanded = expandedTickets[tId];
                                                                     return (
-                                                                        <React.Fragment key={idx}>
+                                                                        <React.Fragment key={tId || idx}>
                                                                             <tr onClick={() => toggleTicketExpand(t[1])} className={`cursor-pointer hover:bg-green-50/30 transition-colors ${isTicketExpanded ? 'bg-green-50/30' : ''}`}>
                                                                                 <td className="p-3 text-slate-500 font-mono text-xs">{t[1]}</td>
                                                                                 <td className="p-3 font-medium text-slate-700">{t[0]}</td>
@@ -1941,7 +1813,7 @@
                                                 <div className="flex-1 overflow-y-auto pr-2 space-y-2">
                                                     {analyticsStats.windows.map((item, i) => (
                                                         <div
-                                                            key={i}
+                                                            key={item.name}
                                                             onClick={() => handleWindowClick(item.name)}
                                                             className={`group p-3 rounded-lg border transition-all cursor-pointer ${selectedWindow === item.name ? 'bg-blue-50 border-blue-200 shadow-sm' : 'border-transparent hover:bg-slate-50'}`}
                                                         >
@@ -2016,7 +1888,7 @@
                                                             const late = isLate(row);
                                                             const hasFeedback = isFeedbackCountable(row[8]);
                                                             return (
-                                                                <div key={idx} className="p-4 rounded-lg border border-slate-100 bg-slate-50 hover:bg-white hover:border-blue-200 hover:shadow-md transition-all group">
+                                                                <div key={row[COL.ID] || idx} className="p-4 rounded-lg border border-slate-100 bg-slate-50 hover:bg-white hover:border-blue-200 hover:shadow-md transition-all group">
                                                                     <div className="flex justify-between items-start mb-3">
                                                                         <div className="flex-1">
                                                                             <div className="flex items-center gap-2 mb-1.5">
@@ -2062,7 +1934,7 @@
                                                 <div className="flex-1 overflow-y-auto pr-2 space-y-4">
                                                     {analyticsStats.types.map((item, i) => (
                                                         <div
-                                                            key={i}
+                                                            key={item.name}
                                                             onClick={() => handleTypeClick(item.name)}
                                                             className={`group p-3 border rounded-lg transition-all cursor-pointer 
                                             ${selectedType === item.name

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+    COL,
     formatSimpleDate,
     getMonthStr,
     getDaysDiff,
@@ -7,7 +8,22 @@ import {
     isFeedbackCountable,
     getMergedTypeName,
     normalize,
+    diffRows,
+    PROXY_STRATEGIES,
+    isHtmlErrorPage,
+    unwrapProxyResponse,
 } from './utils.js';
+
+// 建立一列測試資料：可指定單號(id)、反饋(J)、遲送(K)
+const makeRowFull = ({ id = '', type = 'P', name = 'task', feedback = '', late = '' } = {}) => {
+    const row = new Array(10).fill('');
+    row[COL.TYPE] = type;
+    row[COL.ID] = id;
+    row[COL.NAME] = name;
+    row[COL.FEEDBACK] = feedback;
+    row[COL.LATE] = late;
+    return row;
+};
 
 // ============================================================
 // formatSimpleDate
@@ -201,5 +217,166 @@ describe('normalize', () => {
 
     it('數字 0 應保留為有效值', () => {
         expect(normalize(0)).toBe('0');
+    });
+});
+
+// ============================================================
+// getDaysDiff - 修正 B3：未來日期不應算成正天數
+// ============================================================
+describe('getDaysDiff - 未來日期 (修正 B3)', () => {
+    const fixedNow = new Date(2025, 1, 25); // 2025-02-25
+
+    it('未來日期 → 0（不再用 Math.abs 算成正天數）', () => {
+        expect(getDaysDiff('Date(2025,1,28)', fixedNow)).toBe(0); // 3 天後
+        expect(getDaysDiff('Date(2025,2,10)', fixedNow)).toBe(0); // 下個月
+    });
+
+    it('當天不同時分仍為 0（已正規化到午夜）', () => {
+        const noonNow = new Date(2025, 1, 25, 18, 30);
+        expect(getDaysDiff('Date(2025,1,25)', noonNow)).toBe(0);
+    });
+
+    it('ISO 字串以本地午夜解析，跨時區不會 off-by-one', () => {
+        expect(getDaysDiff('2025-02-15', fixedNow)).toBe(10);
+    });
+});
+
+// ============================================================
+// diffRows - 修正 B1：以單號為鍵比對，免疫插入/刪除/排序
+// ============================================================
+describe('diffRows', () => {
+    it('新單號 → added', () => {
+        const oldData = [makeRowFull({ id: 'A1' })];
+        const newData = [makeRowFull({ id: 'A1' }), makeRowFull({ id: 'A2' })];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added).toHaveLength(1);
+        expect(added[0][COL.ID]).toBe('A2');
+        expect(changed).toHaveLength(0);
+    });
+
+    it('反饋(J欄)改變 → changed.feedbackChanged', () => {
+        const oldData = [makeRowFull({ id: 'A1', feedback: '無' })];
+        const newData = [makeRowFull({ id: 'A1', feedback: 'Bug 修復中' })];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added).toHaveLength(0);
+        expect(changed).toHaveLength(1);
+        expect(changed[0].feedbackChanged).toBe(true);
+        expect(changed[0].lateChanged).toBe(false);
+    });
+
+    it('遲送(K欄)改變 → changed.lateChanged', () => {
+        const oldData = [makeRowFull({ id: 'A1', late: '' })];
+        const newData = [makeRowFull({ id: 'A1', late: '延遲3天' })];
+        const { changed } = diffRows(oldData, newData);
+        expect(changed).toHaveLength(1);
+        expect(changed[0].lateChanged).toBe(true);
+    });
+
+    it('「空白/無/空字串」視為相同 → 不算異動', () => {
+        const oldData = [makeRowFull({ id: 'A1', feedback: '空白', late: '無' })];
+        const newData = [makeRowFull({ id: 'A1', feedback: '無', late: '' })];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added).toHaveLength(0);
+        expect(changed).toHaveLength(0);
+    });
+
+    it('在中間插入一列 → 只報新增，既有列不誤報（B1 核心情境）', () => {
+        const oldData = [
+            makeRowFull({ id: 'A1', feedback: 'fb1' }),
+            makeRowFull({ id: 'A2', feedback: 'fb2' }),
+        ];
+        // 在 A1 與 A2 之間插入 NEW，導致 A2 索引位移
+        const newData = [
+            makeRowFull({ id: 'A1', feedback: 'fb1' }),
+            makeRowFull({ id: 'NEW', feedback: 'fbN' }),
+            makeRowFull({ id: 'A2', feedback: 'fb2' }),
+        ];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added.map(r => r[COL.ID])).toEqual(['NEW']);
+        expect(changed).toHaveLength(0); // 舊版用索引比對會在此狂報誤報
+    });
+
+    it('刪除一列 → 不誤報剩餘列', () => {
+        const oldData = [
+            makeRowFull({ id: 'A1', feedback: 'fb1' }),
+            makeRowFull({ id: 'A2', feedback: 'fb2' }),
+        ];
+        const newData = [makeRowFull({ id: 'A2', feedback: 'fb2' })];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added).toHaveLength(0);
+        expect(changed).toHaveLength(0);
+    });
+
+    it('重新排序 → 不誤報', () => {
+        const oldData = [
+            makeRowFull({ id: 'A1', feedback: 'fb1' }),
+            makeRowFull({ id: 'A2', feedback: 'fb2' }),
+        ];
+        const newData = [
+            makeRowFull({ id: 'A2', feedback: 'fb2' }),
+            makeRowFull({ id: 'A1', feedback: 'fb1' }),
+        ];
+        const { added, changed } = diffRows(oldData, newData);
+        expect(added).toHaveLength(0);
+        expect(changed).toHaveLength(0);
+    });
+
+    it('無單號的列被忽略', () => {
+        const oldData = [makeRowFull({ id: 'A1' })];
+        const newData = [makeRowFull({ id: 'A1' }), makeRowFull({ id: '' })];
+        const { added } = diffRows(oldData, newData);
+        expect(added).toHaveLength(0);
+    });
+
+    it('非陣列輸入 → 空結果', () => {
+        expect(diffRows(null, null)).toEqual({ added: [], changed: [] });
+    });
+});
+
+// ============================================================
+// CORS proxy helpers (修正項 5)
+// ============================================================
+describe('PROXY_STRATEGIES', () => {
+    it('包含三個 proxy，且 AllOrigins 標記 wrapped', () => {
+        expect(PROXY_STRATEGIES).toHaveLength(3);
+        const allOrigins = PROXY_STRATEGIES.find(s => s.wrapped);
+        expect(allOrigins.name).toBe('AllOrigins (JSON)');
+    });
+
+    it('getUrl 會正確編碼目標 URL', () => {
+        const codetabs = PROXY_STRATEGIES[0];
+        const url = codetabs.getUrl('https://x.com/a.json?key=1&b=2');
+        expect(url).toContain(encodeURIComponent('https://x.com/a.json?key=1&b=2'));
+    });
+});
+
+describe('isHtmlErrorPage', () => {
+    it('HTML 頁面 → true', () => {
+        expect(isHtmlErrorPage('<!DOCTYPE html><html>...</html>')).toBe(true);
+        expect(isHtmlErrorPage('  <html><body>login</body></html>')).toBe(true);
+    });
+    it('JSON 字串 → false', () => {
+        expect(isHtmlErrorPage('{"issue":{}}')).toBe(false);
+        expect(isHtmlErrorPage('')).toBe(false);
+        expect(isHtmlErrorPage(null)).toBe(false);
+    });
+});
+
+describe('unwrapProxyResponse', () => {
+    const plain = PROXY_STRATEGIES[0];          // CodeTabs（非 wrapped）
+    const wrapped = PROXY_STRATEGIES.find(s => s.wrapped); // AllOrigins
+
+    it('非 wrapped proxy → 直接 parse', () => {
+        expect(unwrapProxyResponse(plain, '{"issue":{"id":1}}')).toEqual({ issue: { id: 1 } });
+    });
+    it('wrapped proxy → 解開 contents 內層 JSON', () => {
+        const text = JSON.stringify({ contents: JSON.stringify({ issue: { id: 9 } }) });
+        expect(unwrapProxyResponse(wrapped, text)).toEqual({ issue: { id: 9 } });
+    });
+    it('wrapped 但 contents 為空 → null', () => {
+        expect(unwrapProxyResponse(wrapped, JSON.stringify({ contents: '' }))).toBeNull();
+    });
+    it('無效 JSON → null', () => {
+        expect(unwrapProxyResponse(plain, '<html>error</html>')).toBeNull();
     });
 });
