@@ -12,6 +12,7 @@ import {
     PROXY_STRATEGIES,
     isHtmlErrorPage,
     unwrapProxyResponse,
+    computeGanttLayout,
 } from './utils.js';
 
 // 建立一列測試資料：可指定單號(id)、反饋(J)、遲送(K)
@@ -378,5 +379,57 @@ describe('unwrapProxyResponse', () => {
     });
     it('無效 JSON → null', () => {
         expect(unwrapProxyResponse(plain, '<html>error</html>')).toBeNull();
+    });
+});
+
+// ============================================================
+// computeGanttLayout - 甘特圖時間軸寬度自適應（延展 / RWD 收縮）
+// ============================================================
+describe('computeGanttLayout', () => {
+    it('寬螢幕：日欄延展填滿，左欄達上限 400', () => {
+        const { leftPanelWidth, dayWidth } = computeGanttLayout(1735, 30);
+        expect(leftPanelWidth).toBe(400);            // min(400, 1735*0.28=485.8) = 400
+        expect(dayWidth).toBe(44);                   // floor((1735-400)/30) = 44，介於 [40,120]
+    });
+
+    it('窄螢幕：日欄縮到下限 40、左欄縮到下限 200', () => {
+        const { leftPanelWidth, dayWidth } = computeGanttLayout(695, 30);
+        expect(leftPanelWidth).toBe(200);            // max(200, 695*0.28=194.6) = 200
+        expect(dayWidth).toBe(40);                   // floor((695-200)/30)=16 → clamp 40
+    });
+
+    it('左欄寬為 containerWidth 的 28%（四捨五入），夾在 [200,400]', () => {
+        expect(computeGanttLayout(500, 30).leftPanelWidth).toBe(200);   // 140 → 下限 200
+        expect(computeGanttLayout(900, 30).leftPanelWidth).toBe(252);   // 900*0.28=252
+        expect(computeGanttLayout(2000, 30).leftPanelWidth).toBe(400);  // 560 → 上限 400
+    });
+
+    it('超寬螢幕：日欄夾在上限 120', () => {
+        expect(computeGanttLayout(10000, 30).dayWidth).toBe(120);       // floor(9600/30)=320 → clamp 120
+    });
+
+    it('floor 保證內容總寬不超過容器（避免溢出/回饋迴圈）', () => {
+        for (const cw of [1735, 1600, 1440, 1200, 900]) {
+            const { leftPanelWidth, dayWidth } = computeGanttLayout(cw, 30);
+            // 只有在「未觸及 dayWidth 下限」時才保證填滿不溢出
+            if (dayWidth > 40) {
+                expect(leftPanelWidth + dayWidth * 30).toBeLessThanOrEqual(cw);
+            }
+        }
+    });
+
+    it('可自訂 min / max 日寬', () => {
+        expect(computeGanttLayout(695, 30, { minDayWidth: 60 }).dayWidth).toBe(60);
+        expect(computeGanttLayout(10000, 30, { maxDayWidth: 80 }).dayWidth).toBe(80);
+    });
+
+    it('可自訂顯示天數', () => {
+        const { dayWidth } = computeGanttLayout(1735, 14);
+        expect(dayWidth).toBe(95);                   // floor((1735-400)/14)=95
+    });
+
+    it('ganttDays 為 0 不會除以零', () => {
+        const r = computeGanttLayout(1000, 0);
+        expect(Number.isFinite(r.dayWidth)).toBe(true);
     });
 });

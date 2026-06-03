@@ -229,3 +229,25 @@ export function unwrapProxyResponse(strategy, text) {
   }
   return json;
 }
+
+/**
+ * 甘特圖時間軸寬度自適應計算（純函式，供單元測試）。
+ * 依甘特容器可視寬度，算出左欄寬與每日欄寬：
+ *  - leftPanelWidth：containerWidth 的 28%，夾在 [200, 400]
+ *  - dayWidth：剩餘寬度平均分給 ganttDays 天（用 floor 確保總寬不超出可視寬，
+ *    避免 ResizeObserver 回饋迴圈），再夾在 [minDayWidth, maxDayWidth]
+ * 寬螢幕 → 日欄延展填滿；窄螢幕 → 縮到 min 後由呼叫端決定水平捲動。
+ * @param {number} containerWidth 甘特捲動容器可視寬（px）
+ * @param {number} ganttDays 顯示天數（預設 30）
+ * @param {{minDayWidth?:number, maxDayWidth?:number}} opts
+ * @returns {{leftPanelWidth:number, dayWidth:number}}
+ */
+export function computeGanttLayout(containerWidth, ganttDays = 30, opts = {}) {
+  const minDayWidth = opts.minDayWidth != null ? opts.minDayWidth : 40;
+  const maxDayWidth = opts.maxDayWidth != null ? opts.maxDayWidth : 120;
+  const days = ganttDays > 0 ? ganttDays : 1;
+  const leftPanelWidth = Math.round(Math.min(400, Math.max(200, containerWidth * 0.28)));
+  const avail = containerWidth - leftPanelWidth;
+  const dayWidth = Math.max(minDayWidth, Math.min(maxDayWidth, Math.floor(avail / days)));
+  return { leftPanelWidth, dayWidth };
+}
