@@ -881,10 +881,35 @@
                     const d = new Date(); d.setHours(0,0,0,0); return d;
                 }, []);
                 const ganttDays = 30; // 今日往後 1 個月
-                const dayWidth = 80;
                 const rowHeight = 44;
                 const groupHeaderHeight = 30; // 分組標頭高度
-                const leftPanelWidth = 400; // 加寬左側欄
+                const MIN_DAY_WIDTH = 40;   // 每日最小寬（低於此值改為水平捲動，避免日期標頭擠爆）
+                const MAX_DAY_WIDTH = 120;  // 每日最大寬（超寬螢幕不要過度拉長）
+
+                // 天 BAR / 時間軸寬度自適應：依甘特容器可視寬度動態計算每日寬與左欄寬。
+                // 寬螢幕 → 日欄延展填滿；窄螢幕 → 縮小，縮到 MIN 後才出現水平捲動。
+                const [dayWidth, setDayWidth] = useState(64);
+                const [leftPanelWidth, setLeftPanelWidth] = useState(400);
+
+                useLayoutEffect(() => {
+                    const el = ganttRef.current;
+                    if (!el) return;
+                    const measure = () => {
+                        const cw = el.clientWidth;
+                        if (cw <= 0) return;
+                        // 左欄隨寬度收縮（手機更省空間），介於 200~400
+                        const lp = Math.round(Math.min(400, Math.max(200, cw * 0.28)));
+                        const avail = cw - lp;
+                        const dw = Math.max(MIN_DAY_WIDTH, Math.min(MAX_DAY_WIDTH, Math.floor(avail / ganttDays)));
+                        setLeftPanelWidth(lp);
+                        setDayWidth(dw);
+                    };
+                    measure();
+                    const ro = new ResizeObserver(measure);
+                    ro.observe(el);
+                    window.addEventListener('resize', measure); // 後備：確保拖動視窗也會重算
+                    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+                }, [ganttLoading, ganttIssues.length]); // 容器在資料就緒後才掛載，需重新量測並觀察
 
                 const dateRange = useMemo(() => {
                     const dates = [];
