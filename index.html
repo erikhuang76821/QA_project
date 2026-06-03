@@ -174,7 +174,11 @@
 
             // *設定: 專案合併規則 state
             // 結構: [{ id: 1, targetName: '合併後名稱', sources: ['原名稱1', '原名稱2'] }]
-            const [mergeRules, setMergeRules] = useState([]);
+            // 預設合併規則：把大小寫不一致的「Social casino / social casino」併為同一專案統計。
+            // （mergeRules 無持久化，重載即重置；故以預設值種入。可於「設定 → 專案合併設定」編輯或移除。）
+            const [mergeRules, setMergeRules] = useState([
+                { id: 1, targetName: 'Social Casino', sources: ['Social casino', 'social casino'] },
+            ]);
             // 輔助輸入 state
             const [editingRuleName, setEditingRuleName] = useState('');
             const [editingSource, setEditingSource] = useState('');
@@ -1374,7 +1378,7 @@
                         </div>
                     </div>
 
-                    <div className={`flex-1 mx-auto w-full p-4 md:p-6 ${activeTab === 'schedule' ? 'max-w-[1800px]' : 'max-w-7xl'}`}>
+                    <div className={`flex-1 mx-auto w-full p-4 md:p-6 ${activeTab === 'console' ? 'max-w-7xl' : 'max-w-[1800px]'}`}>
 
                         {/* === View 1: 進行中看板 (Dashboard) === */}
                         {activeTab === 'dashboard' && (
@@ -1608,12 +1612,13 @@
                                                                         <table className="w-full text-left table-fixed">
                                                                             <thead className="text-slate-500 border-b border-slate-200">
                                                                                 <tr>
-                                                                                    <th className="pb-2 font-medium w-[35%]">當前測試項目</th>
+                                                                                    <th className="pb-2 font-medium w-[27%]">當前測試項目</th>
                                                                                     <th className="pb-2 font-medium w-[12%]">送測日</th>
                                                                                     <th className="pb-2 font-medium w-[10%]">中班</th>
                                                                                     <th className="pb-2 font-medium w-[18%]">狀況反饋</th>
                                                                                     <th className="pb-2 font-medium w-[13%] text-right">剩餘工時</th>
                                                                                     <th className="pb-2 font-medium w-[12%] text-right">累計天數</th>
+                                                                                    <th className="pb-2 font-medium w-[8%] text-center">連結</th>
                                                                                 </tr>
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
@@ -1635,8 +1640,16 @@
                                                                                                 <td className="py-2 text-right align-top text-slate-600 font-mono">
                                                                                                     {getDaysDiff(t[2])} 天
                                                                                                 </td>
+                                                                                                <td className="py-2 text-center align-top">
+                                                                                                    <a href={`https://igs.redmine-x.com/issues/${tId}`} target="_blank" rel="noopener noreferrer"
+                                                                                                        onClick={(e) => e.stopPropagation()}
+                                                                                                        className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-slate-100 text-slate-500 hover:bg-blue-100 hover:text-blue-600 transition-colors"
+                                                                                                        title="開啟 Redmine">
+                                                                                                        <ExternalLink size={13} />
+                                                                                                    </a>
+                                                                                                </td>
                                                                                             </tr>
-                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={7} />}
                                                                                         </React.Fragment>
                                                                                     );
                                                                                 })}
@@ -1681,12 +1694,13 @@
                                                                         <table className="w-full text-left table-fixed">
                                                                             <thead className="text-slate-500 border-b border-slate-200">
                                                                                 <tr>
-                                                                                    <th className="pb-2 font-medium w-[35%]">當前測試項目</th>
+                                                                                    <th className="pb-2 font-medium w-[27%]">當前測試項目</th>
                                                                                     <th className="pb-2 font-medium w-[12%]">送測日</th>
                                                                                     <th className="pb-2 font-medium w-[10%]">早班</th>
                                                                                     <th className="pb-2 font-medium w-[18%]">狀況反饋</th>
                                                                                     <th className="pb-2 font-medium w-[13%] text-right">剩餘工時</th>
                                                                                     <th className="pb-2 font-medium w-[12%] text-right">累計天數</th>
+                                                                                    <th className="pb-2 font-medium w-[8%] text-center">連結</th>
                                                                                 </tr>
                                                                             </thead>
                                                                             <tbody className="divide-y divide-slate-100">
@@ -1708,8 +1722,16 @@
                                                                                                 <td className="py-2 text-right align-top text-slate-600 font-mono">
                                                                                                     {getDaysDiff(t[2])} 天
                                                                                                 </td>
+                                                                                                <td className="py-2 text-center align-top">
+                                                                                                    <a href={`https://igs.redmine-x.com/issues/${tId}`} target="_blank" rel="noopener noreferrer"
+                                                                                                        onClick={(e) => e.stopPropagation()}
+                                                                                                        className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-slate-100 text-slate-500 hover:bg-blue-100 hover:text-blue-600 transition-colors"
+                                                                                                        title="開啟 Redmine">
+                                                                                                        <ExternalLink size={13} />
+                                                                                                    </a>
+                                                                                                </td>
                                                                                             </tr>
-                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={7} />}
                                                                                         </React.Fragment>
                                                                                     );
                                                                                 })}
@@ -1741,6 +1763,7 @@
                                                                     <th className="p-3 font-medium">送測日</th>
                                                                     <th className="p-3 font-medium">狀況反饋</th>
                                                                     <th className="p-3 font-medium text-right">累計天數</th>
+                                                                    <th className="p-3 font-medium text-center">連結</th>
                                                                 </tr>
                                                             </thead>
                                                             <tbody className="divide-y divide-slate-100">
@@ -1758,8 +1781,16 @@
                                                                                     <span className="text-green-700 font-medium bg-green-50 px-2 py-1 rounded border border-green-100 text-xs">{t[8]}</span>
                                                                                 </td>
                                                                                 <td className="p-3 text-right text-slate-600 font-mono">{getDaysDiff(t[2])} 天</td>
+                                                                                <td className="p-3 text-center">
+                                                                                    <a href={`https://igs.redmine-x.com/issues/${tId}`} target="_blank" rel="noopener noreferrer"
+                                                                                        onClick={(e) => e.stopPropagation()}
+                                                                                        className="inline-flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:bg-blue-100 hover:text-blue-600 transition-colors"
+                                                                                        title="開啟 Redmine">
+                                                                                        <ExternalLink size={14} />
+                                                                                    </a>
+                                                                                </td>
                                                                             </tr>
-                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={6} />}
+                                                                            {isTicketExpanded && <TicketDetailRow ticketId={t[1]} colSpan={7} />}
                                                                         </React.Fragment>
                                                                     );
                                                                 })}
