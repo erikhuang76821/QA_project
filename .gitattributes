@@ -1,0 +1,4 @@
+# Keep web source files LF to avoid CRLF churn on Windows edits
+index.html text eol=lf
+*.js text eol=lf
+*.css text eol=lf
