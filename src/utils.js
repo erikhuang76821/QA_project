@@ -131,24 +131,85 @@ export function normalize(val) {
 }
 
 /**
+ * 為一份資料建立「穩定鍵 → 列」的 Map（keyMode:'row' 專用）。
+ *
+ * 修正 B4：同名任務（如「【品檢】開發中測試支援」）常常沒有單號，或多列共用同一
+ * 暫用單號。原本只用單號當鍵時：空鍵被整列略過、重複鍵在 Map 中「後寫覆蓋前寫」，
+ * 導致比對基準在兩列間乒乓，每次刷新都把同一筆判成異動而 5 分鐘狂報。
+ *
+ * 解法：單號優先（維持 B1 對排序/插入/刪除的免疫）；
+ *  - 無單號 → 改用「列號」當基底鍵（行#i），同名空單號列不再互相碰撞；
+ *  - 同一基底鍵重複出現（重複單號或多列同位）→ 依出現序加序號（__dup2、__dup3…）去碰撞。
+ * 對新舊兩份資料套用同一套確定性規則，只要同鍵列的相對順序不變就能正確對齊。
+ *
+ * @param {Array[]} data
+ * @param {number} idIndex 單號所在欄位
+ * @returns {Map<string, Array>}
+ */
+function buildRowMap(data, idIndex = COL.ID) {
+  const map = new Map();
+  if (!Array.isArray(data)) return map;
+  const seen = new Map(); // 基底鍵 → 已出現次數
+  data.forEach((row, i) => {
+    const id = String(row?.[idIndex] ?? '').trim();
+    const base = id || `行#${i}`;          // 無單號 → 用列號當基底
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    const key = n === 1 ? base : `${base}__dup${n}`; // 重複基底 → 加序號
+    map.set(key, row);
+  });
+  return map;
+}
+
+/**
  * 比對新舊兩份資料，找出「新增」與「狀態異動」的列。
  *
- * 修正 B1：原本的 checkAndNotify 以「陣列索引」逐列比對，試算表只要在中間
- * 插入/刪除/排序一列，索引整批位移，就會把大量既有列誤判成異動而狂發通知。
+ * 修正 B1：原本以「陣列索引」逐列比對，插入/刪除/排序一列會整批位移而狂發誤報。
  * 改以「單號 (COL.ID)」為鍵建立 Map 比對，對插入/刪除/排序免疫。
+ *
+ * keyMode 控制鍵策略：
+ *  - 'id'（預設，向後相容）：單號為鍵，空單號的列一律忽略。
+ *  - 'row'（修正 B4）：單號優先、無單號退回列號、重複單號加序號（見 buildRowMap）。
+ *    用於 checkAndNotify，讓沒有單號的同名任務也能被穩定追蹤、不再互相碰撞。
  *
  * 為純函式（不發送通知、不依賴 React），可被單元測試完整覆蓋。
  *
  * @param {Array[]} oldData 前一次快照
  * @param {Array[]} newData 本次資料
- * @param {number} idIndex 單號所在欄位（預設 COL.ID）
+ * @param {number|{idIndex?:number, keyMode?:'id'|'row'}} [options]
+ *   數字 → 視為 idIndex（舊簽名）；物件 → { idIndex, keyMode }
  * @returns {{ added: Array[], changed: Array<{oldRow, newRow, feedbackChanged, lateChanged}> }}
  */
-export function diffRows(oldData, newData, idIndex = COL.ID) {
+export function diffRows(oldData, newData, options = {}) {
+  // 向後相容：第三參數若為數字，視為舊簽名 diffRows(old, new, idIndex)
+  const opts = typeof options === 'number' ? { idIndex: options } : (options || {});
+  const idIndex = opts.idIndex != null ? opts.idIndex : COL.ID;
+  const keyMode = opts.keyMode || 'id';
+
   const added = [];
   const changed = [];
   if (!Array.isArray(oldData) || !Array.isArray(newData)) return { added, changed };
 
+  const compare = (oldRow, newRow) => {
+    const feedbackChanged = normalize(oldRow[COL.FEEDBACK]) !== normalize(newRow[COL.FEEDBACK]);
+    const lateChanged = normalize(oldRow[COL.LATE]) !== normalize(newRow[COL.LATE]);
+    if (feedbackChanged || lateChanged) {
+      changed.push({ oldRow, newRow, feedbackChanged, lateChanged });
+    }
+  };
+
+  if (keyMode === 'row') {
+    const oldMap = buildRowMap(oldData, idIndex);
+    const newMap = buildRowMap(newData, idIndex);
+    newMap.forEach((newRow, k) => {
+      const oldRow = oldMap.get(k);
+      if (!oldRow) { added.push(newRow); return; }
+      compare(oldRow, newRow);
+    });
+    return { added, changed };
+  }
+
+  // 預設 'id' 模式：原邏輯（忽略空單號，免疫排序/插入/刪除）
   const keyOf = (row) => String(row?.[idIndex] ?? '').trim();
   const oldMap = new Map();
   oldData.forEach(row => { const k = keyOf(row); if (k) oldMap.set(k, row); });
@@ -161,14 +222,136 @@ export function diffRows(oldData, newData, idIndex = COL.ID) {
       added.push(newRow);
       return;
     }
-    const feedbackChanged = normalize(oldRow[COL.FEEDBACK]) !== normalize(newRow[COL.FEEDBACK]);
-    const lateChanged = normalize(oldRow[COL.LATE]) !== normalize(newRow[COL.LATE]);
-    if (feedbackChanged || lateChanged) {
-      changed.push({ oldRow, newRow, feedbackChanged, lateChanged });
-    }
+    compare(oldRow, newRow);
   });
 
   return { added, changed };
+}
+
+/**
+ * 偵測「會落到列號 fallback、判斷較脆弱」的資料瑕疵，供 UI 提示維護者從源頭修正。
+ *
+ * 兩類風險：
+ *  - duplicateIds：同一單號出現在多列（diffRows 需加序號去碰撞，排序後對齊較脆弱）。
+ *  - riskyNames：無單號、且任務名在「無單號群」中重複（只能用列號當鍵，重排會誤報）。
+ * 只有 TYPE(B欄) 有值的列才視為有效任務列，避免把空白列算進來。
+ *
+ * @param {Array[]} data
+ * @param {number} idIndex 單號欄（預設 COL.ID）
+ * @param {number} nameIndex 任務名欄（預設 COL.NAME）
+ * @returns {{ duplicateIds: Array<{id:string,count:number}>, riskyNames: Array<{name:string,count:number}> }}
+ */
+export function findKeyAnomalies(data, idIndex = COL.ID, nameIndex = COL.NAME) {
+  const duplicateIds = [];
+  const riskyNames = [];
+  if (!Array.isArray(data)) return { duplicateIds, riskyNames };
+
+  const idCount = new Map();
+  const noIdNameCount = new Map();
+  data.forEach(row => {
+    if (!row || !String(row[COL.TYPE] ?? '').trim()) return; // 跳過空白列
+    const id = String(row[idIndex] ?? '').trim();
+    if (id) {
+      idCount.set(id, (idCount.get(id) || 0) + 1);
+    } else {
+      const name = String(row[nameIndex] ?? '').trim() || '(無名稱)';
+      noIdNameCount.set(name, (noIdNameCount.get(name) || 0) + 1);
+    }
+  });
+
+  idCount.forEach((count, id) => { if (count > 1) duplicateIds.push({ id, count }); });
+  noIdNameCount.forEach((count, name) => { if (count > 1) riskyNames.push({ name, count }); });
+  return { duplicateIds, riskyNames };
+}
+
+/**
+ * 通知去重（dedupe）——純函式層，供 checkAndNotify 與單元測試共用。
+ *
+ * 修正 B4 的最終防線：即使鍵策略偶有失準，只要「同一則通知」的指紋在 TTL 內
+ * 出現過就不再重送，徹底擋掉每 5 分鐘洗版。指紋刻意不含時間戳，故同一變動的
+ * 多次刷新會得到相同指紋而被收斂。
+ */
+export const DEDUPE_TTL_MS = 6 * 60 * 60 * 1000; // 預設 6 小時
+
+/** 狀態異動指紋：任務名 + 欄位(J/K) + 正規化後的舊值/新值 */
+export function changeFingerprint(taskName, field, oldVal, newVal) {
+  return [String(taskName ?? '').trim(), field, normalize(oldVal), normalize(newVal)].join('|');
+}
+
+/** 新增任務指紋：用任務名 + 附加識別（如品檢人員），不綁列號以免重排時重報 */
+export function addFingerprint(taskName, extra = '') {
+  return ['ADD', String(taskName ?? '').trim(), String(extra ?? '').trim()].join('|');
+}
+
+/**
+ * 「本輪該送哪些通知」的單一決策來源（diff + 指紋 + dedupe 全包）。
+ *
+ * 這是 checkAndNotify 與單元測試共用的同一份邏輯——app 真正跑的就是這個函式，
+ * 所以測試對它斷言＝直接驗證線上行為，不再各寫一份模擬而失真。
+ *
+ * 純函式：不發送、不碰 localStorage、不依賴 React；訊息文字交給呼叫端組裝。
+ *
+ * @param {Array[]} prevData 前一次快照
+ * @param {Array[]} newData 本次資料
+ * @param {object} ledger 去重帳本（指紋→時間戳），可為 null
+ * @param {number} now 當前時間戳（ms）
+ * @param {number} [ttlMs] 去重存活時間
+ * @returns {{ notifications: Array<{kind:'add'|'change', fingerprint:string, newRow:Array, oldRow?:Array, feedbackChanged?:boolean, lateChanged?:boolean}>, ledger: object }}
+ *   notifications 已套用 dedupe，只含「本輪真的該送」的項目；ledger 為更新後帳本。
+ */
+export function computeNotifications(prevData, newData, ledger, now, ttlMs = DEDUPE_TTL_MS) {
+  const notifications = [];
+  let nextLedger = ledger || {};
+  if (!Array.isArray(prevData) || !Array.isArray(newData)) {
+    return { notifications, ledger: nextLedger };
+  }
+
+  // keyMode:'row' → 單號優先、無單號用列號、重複單號加序號，根除同名碰撞狂報
+  const { added, changed } = diffRows(prevData, newData, { keyMode: 'row' });
+
+  const consider = (fp, item) => {
+    if (isDuplicateNotification(nextLedger, fp, now, ttlMs)) return; // TTL 內重複 → 不送
+    notifications.push({ ...item, fingerprint: fp });
+    nextLedger = recordNotification(nextLedger, fp, now, ttlMs);
+  };
+
+  added.forEach(newRow => {
+    if (!String(newRow?.[COL.TYPE] ?? '').trim()) return; // 無專案別的空列不報
+    const name = String(newRow[COL.NAME] ?? '').trim() || '(無名稱)';
+    consider(addFingerprint(name, newRow[COL.MORNING] || ''), { kind: 'add', newRow });
+  });
+
+  changed.forEach(({ oldRow, newRow, feedbackChanged, lateChanged }) => {
+    const name = String(newRow[COL.NAME] ?? '').trim() || '(無名稱)';
+    const fp = feedbackChanged
+      ? changeFingerprint(name, 'J', oldRow[COL.FEEDBACK], newRow[COL.FEEDBACK])
+      : changeFingerprint(name, 'K', oldRow[COL.LATE], newRow[COL.LATE]);
+    consider(fp, { kind: 'change', oldRow, newRow, feedbackChanged, lateChanged });
+  });
+
+  return { notifications, ledger: nextLedger };
+}
+
+/** 指紋是否在 TTL 內已通知過（true = 應跳過） */
+export function isDuplicateNotification(ledger, fp, now, ttlMs = DEDUPE_TTL_MS) {
+  if (!ledger || typeof ledger !== 'object') return false;
+  const t = ledger[fp];
+  if (t == null) return false;
+  return (now - t) < ttlMs;
+}
+
+/**
+ * 記錄一筆已通知指紋，並順手清掉過期項目，回傳新的 ledger（不可變更新）。
+ */
+export function recordNotification(ledger, fp, now, ttlMs = DEDUPE_TTL_MS) {
+  const next = {};
+  if (ledger && typeof ledger === 'object') {
+    for (const k in ledger) {
+      if (ledger[k] != null && (now - ledger[k]) < ttlMs) next[k] = ledger[k];
+    }
+  }
+  next[fp] = now;
+  return next;
 }
 
 /**

@@ -74,6 +74,8 @@
             getMergedTypeName as getMergedTypeNameRaw,
             normalize,
             diffRows,
+            findKeyAnomalies,
+            computeNotifications,
             PROXY_STRATEGIES,
             isHtmlErrorPage,
             unwrapProxyResponse,
@@ -153,8 +155,13 @@
             // 點擊展開的 ticket (取代原本 hover tooltip)
             const [expandedTickets, setExpandedTickets] = useState({});
 
-            // 比對用：儲存上一次的資料快照
+            // 比對用：儲存上一次的資料快照（同步持久化到 localStorage，重整後不誤判）
             const prevDataRef = useRef(null);
+            // 通知去重 ledger：指紋 → 最後通知時間戳（修正 B4，擋同名/重複任務狂報）
+            const notifLedgerRef = useRef(null);
+            // localStorage 鍵（含版本，日後格式變動好汰換）
+            const SNAPSHOT_KEY = 'qa_snapshot_v1';
+            const LEDGER_KEY = 'qa_notif_ledger_v1';
 
             // 排序狀態 (Dashboard)
             const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
@@ -427,28 +434,54 @@
             }, [tgToken, tgChatId]);
 
             const checkAndNotify = useCallback((newData) => {
-                if (!prevDataRef.current) { prevDataRef.current = newData; return; }
+                // 快照持久化：記憶體沒快照時先從 localStorage 還原，
+                // 避免重新整理 / 重新掛載後 prevData=null，把整批舊資料當成新增/異動狂報。
+                if (!prevDataRef.current) {
+                    try {
+                        const saved = localStorage.getItem(SNAPSHOT_KEY);
+                        if (saved) prevDataRef.current = JSON.parse(saved);
+                    } catch (e) { /* 還原失敗（隱私模式/格式變動）→ 視為無快照 */ }
+                }
+                if (!prevDataRef.current) {
+                    prevDataRef.current = newData;
+                    try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(newData)); } catch (e) {}
+                    return;
+                }
 
-                // 修正 B1：以單號為鍵比對（diffRows），插入/刪除/排序列不再造成誤報
-                const { added, changed } = diffRows(prevDataRef.current, newData);
+                // 載入去重 ledger
+                let ledger = notifLedgerRef.current;
+                if (ledger == null) {
+                    try { ledger = JSON.parse(localStorage.getItem(LEDGER_KEY) || '{}'); } catch (e) { ledger = {}; }
+                }
 
-                added.forEach(newRow => {
-                    if (!newRow[COL.TYPE]) return;
-                    const msg = `🆕 <b>新增任務</b>\n任務內容：${newRow[COL.NAME] || '(無名稱)'} , 品檢: ${newRow[COL.MORNING] || ''}`;
-                    sendTelegramMessage(msg);
-                });
+                // 修正 B1+B4：交給共用純函式 computeNotifications 決策（diff + 指紋 + dedupe），
+                // app 與單元測試跑的是同一份邏輯，避免測試與線上行為不一致。
+                const { notifications, ledger: nextLedger } =
+                    computeNotifications(prevDataRef.current, newData, ledger, Date.now());
 
-                changed.forEach(({ oldRow, newRow, feedbackChanged, lateChanged }) => {
+                notifications.forEach(n => {
+                    if (n.kind === 'add') {
+                        const name = n.newRow[COL.NAME] || '(無名稱)';
+                        sendTelegramMessage(`🆕 <b>新增任務</b>\n任務內容：${name} , 品檢: ${n.newRow[COL.MORNING] || ''}`);
+                        return;
+                    }
+                    // kind === 'change'
+                    const { oldRow, newRow, feedbackChanged, lateChanged } = n;
+                    const name = newRow[COL.NAME] || '(無名稱)';
                     let changeDesc = '';
                     if (feedbackChanged) changeDesc += `\n狀況反饋: "${oldRow[COL.FEEDBACK] || '無'}" ➔ "${newRow[COL.FEEDBACK] || '無'}"`;
                     if (lateChanged) changeDesc += `\n遲送狀態: "${oldRow[COL.LATE] || '無'}" ➔ "${newRow[COL.LATE] || '無'}"`;
                     const now = new Date();
                     const timeStr = `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-                    const msg = `⚠️ <b>測試狀況異動</b> : ${timeStr}\n任務：${newRow[COL.NAME] || '(無名稱)'}${changeDesc}`;
-                    sendTelegramMessage(msg);
+                    sendTelegramMessage(`⚠️ <b>測試狀況異動</b> : ${timeStr}\n任務：${name}${changeDesc}`);
                 });
 
                 prevDataRef.current = newData;
+                notifLedgerRef.current = nextLedger;
+                try {
+                    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(newData));
+                    localStorage.setItem(LEDGER_KEY, JSON.stringify(nextLedger));
+                } catch (e) { /* 配額不足 / 隱私模式 → 退化為記憶體內快取，至少本次 session 有效 */ }
             }, [sendTelegramMessage]);
 
             const getTgUpdates = async () => {
@@ -635,6 +668,13 @@
             }, [autoRefresh, refreshInterval, fetchData]);
 
             // --- 統計計算 ---
+            // 資料瑕疵偵測：缺單號(同名重複) / 重複單號 → 提示維護者從源頭修正，
+            // 這些列只能靠列號 fallback 比對，排序時較脆弱（見 utils.findKeyAnomalies）。
+            const keyAnomalies = useMemo(() => {
+                if (!data) return { duplicateIds: [], riskyNames: [] };
+                return findKeyAnomalies(data);
+            }, [data]);
+
             const activeStats = useMemo(() => {
                 if (!data) return null;
                 const activeData = data.filter(row => !row[3]); // E欄(Index 3)無結束日期
@@ -2198,6 +2238,27 @@
                                         </div>
                                     </div>
                                 </div>
+
+                                {/* 全寬: 資料瑕疵提醒（缺單號/重複單號 → 通知判斷較脆弱） */}
+                                {(keyAnomalies.duplicateIds.length > 0 || keyAnomalies.riskyNames.length > 0) && (
+                                    <div className="lg:col-span-12 flex gap-3 p-4 bg-amber-50 border border-amber-300 rounded-xl text-sm text-amber-800">
+                                        <AlertTriangle size={18} className="shrink-0 mt-0.5 text-amber-600" />
+                                        <div className="space-y-1">
+                                            <p className="font-semibold">偵測到通知判斷較脆弱的資料</p>
+                                            {keyAnomalies.riskyNames.map(({ name, count }) => (
+                                                <p key={`rn-${name}`}>
+                                                    任務「<span className="font-medium">{name}</span>」有 {count} 列<span className="font-medium">缺單號且同名</span>，僅能靠列號比對，建議補上單號。
+                                                </p>
+                                            ))}
+                                            {keyAnomalies.duplicateIds.map(({ id, count }) => (
+                                                <p key={`di-${id}`}>
+                                                    單號「<span className="font-medium">{id}</span>」重複出現 {count} 次，請確認是否為不同任務誤用同一單號。
+                                                </p>
+                                            ))}
+                                            <p className="text-xs text-amber-600 mt-1">補上唯一單號後，這些列會自動改用單號比對、完全免疫排序位移。</p>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
